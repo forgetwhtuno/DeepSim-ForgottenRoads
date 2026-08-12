@@ -1,0 +1,14 @@
+# Kept as independent checkouts beside Deep Sims for local combined development.
+/ErenshorFollow/
+/ErenshorDuel/
+/Erenshor-Party-Tools/
+/ErenShorCampRelax/
+/Erenshor-Nemesis/
+/Erenshor-PvP/
+
+# Editor/tool working backups, not source.
+/.codex-backups/
+
+# Local reference assemblies and local Codex settings are not distributable source.
+/third_party/
+/.claude/

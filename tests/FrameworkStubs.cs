@@ -23,14 +23,6 @@ namespace UnityEngine
     }
 }
 
-namespace BepInEx.Logging
-{
-    public class ManualLogSource
-    {
-        public void LogWarning(object value) { }
-        public void LogDebug(object value) { }
-    }
-}
 
 public class SimPlayer
 {

@@ -1,5 +1,5 @@
-using BepInEx;
-using BepInEx.Configuration;
+using Lunaris;
+using Lunaris.Config;
 using HarmonyLib;
 using System;
 using System.Collections.Concurrent;
@@ -13,15 +13,20 @@ using UnityEngine;
 
 namespace ErenshorDeepSims
 {
-    [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
-    [BepInProcess("Erenshor.exe")]
-    public class DeepSimsPlugin : BaseUnityPlugin
+    [LunarisPlugin(PluginName, PluginVersion, "forgetwhtuno",
+        "Grounded local-AI social layer for Erenshor SimPlayers.")]
+    [LunarisPermission(LunarisPermission.FileAccess | LunarisPermission.Network | LunarisPermission.Reflection | LunarisPermission.Harmony)]
+    public class DeepSimsPlugin : LunarisPlugin
     {
         public const string PluginGuid = "forgetwhtuno.erenshor.deepsims";
         public const string PluginName = "Erenshor Deep Sims";
-        public const string PluginVersion = "0.7.0";
+        public const string PluginVersion = "0.7.1";
 
         internal static DeepSimsPlugin Instance;
+
+        private IDeepSimsLog _log = NullDeepSimsLog.Instance;
+        private DeepSimsSettings _settings;
+        private IDeepSimsLog Logger { get { return _log ?? NullDeepSimsLog.Instance; } }
 
         private Harmony _harmony;
         private readonly ConcurrentQueue<Action> _mainThreadActions = new ConcurrentQueue<Action>();
@@ -34,7 +39,7 @@ namespace ErenshorDeepSims
         private readonly List<RequestWork> _pendingWhisperWork = new List<RequestWork>();
         private RequestWork _pendingAutonomousWork;
         private bool _requestPumpRunning;
-        private bool _requestStopping;
+        private volatile bool _requestStopping;
         private long _requestSequence;
         private readonly ConcurrentDictionary<string, int> _whisperGenerations = new ConcurrentDictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         private const int MaxPendingWhispers = 2;
@@ -170,168 +175,174 @@ namespace ErenshorDeepSims
         // and then respect whatever the user has chosen.
         private const int CurrentConfigVersion = 3;
 
-        internal ConfigEntry<int> ConfigVersionConfig;
-        internal ConfigEntry<bool> EnabledConfig;
-        internal ConfigEntry<bool> CoopHostAuthorityConfig;
-        internal ConfigEntry<int> OllamaFailureCooldownSecondsConfig;
-        internal ConfigEntry<int> MaxDeepSimsConfig;
-        internal ConfigEntry<bool> WholePartyDeepSimsConfig;
-        internal ConfigEntry<float> PartyPollSecondsConfig;
-        internal ConfigEntry<string> EndpointConfig;
-        internal ConfigEntry<string> ModelConfig;
-        internal ConfigEntry<int> TimeoutSecondsConfig;
-        internal ConfigEntry<int> ContextWindowConfig;
-        internal ConfigEntry<string> KeepAliveConfig;
-        internal ConfigEntry<int> MaxReplyCharactersConfig;
-        internal ConfigEntry<int> MaxHistoryMessagesConfig;
-        internal ConfigEntry<bool> ApplyVanillaTypingConfig;
-        internal ConfigEntry<bool> HybridWhispersConfig;
-        internal ConfigEntry<string> ManualSlotsConfig;
-        internal ConfigEntry<bool> WikiEnabledConfig;
-        internal ConfigEntry<bool> AutoWikiLookupConfig;
-        internal ConfigEntry<string> WikiApiUrlConfig;
-        internal ConfigEntry<int> WikiTimeoutSecondsConfig;
-        internal ConfigEntry<int> WikiMaxCharsConfig;
-        internal ConfigEntry<bool> OfficialNewsEnabledConfig;
-        internal ConfigEntry<string> OfficialNewsApiUrlConfig;
-        internal ConfigEntry<bool> ExternalNewsEnabledConfig;
-        internal ConfigEntry<bool> ExternalNewsAutoLookupConfig;
-        internal ConfigEntry<string> ExternalNewsApiUrlConfig;
-        internal ConfigEntry<string> ExternalNewsApiKeyConfig;
-        internal ConfigEntry<int> ExternalNewsMaxResultsConfig;
-        internal ConfigEntry<int> ExternalNewsTimeoutSecondsConfig;
-        internal ConfigEntry<int> ExternalNewsMaxCharsConfig;
-        internal ConfigEntry<int> ExternalNewsTtlMinutesConfig;
-        internal ConfigEntry<bool> DirectorEnabledConfig;
-        internal ConfigEntry<bool> EventChatterConfig;
-        internal ConfigEntry<bool> IdleChatterConfig;
-        internal ConfigEntry<bool> SeedingEnabledConfig;
-        internal ConfigEntry<bool> SeedDiagnosticsConfig;
-        internal ConfigEntry<float> SeedSilenceNormalConfig;
-        internal ConfigEntry<float> SeedSilenceCampConfig;
-        internal ConfigEntry<float> SeedSilenceRelaxConfig;
-        internal ConfigEntry<float> SeedFatigueSecondsConfig;
-        internal ConfigEntry<float> SeedRecentTopicWindowMinutesConfig;
-        internal ConfigEntry<bool> SimToSimConfig;
-        internal ConfigEntry<bool> PartyChatResponsesConfig;
-        internal ConfigEntry<float> EventReactionChanceConfig;
-        internal ConfigEntry<float> DuelReactionChanceConfig;
-        internal ConfigEntry<float> EventCooldownSecondsConfig;
-        internal ConfigEntry<bool> CampModeConfig;
-        internal ConfigEntry<bool> CampmasterIntegrationConfig;
-        internal ConfigEntry<float> CampEnterSecondsConfig;
-        internal ConfigEntry<float> CampIdleMinSecondsConfig;
-        internal ConfigEntry<float> CampIdleMaxSecondsConfig;
-        internal ConfigEntry<float> SimToSimChanceConfig;
-        internal ConfigEntry<float> IdleMinSecondsConfig;
-        internal ConfigEntry<float> IdleMaxSecondsConfig;
-        internal ConfigEntry<float> AutonomousCooldownSecondsConfig;
-        internal ConfigEntry<float> TypingCharsPerSecondConfig;
-        internal ConfigEntry<float> MinTypingDelayConfig;
-        internal ConfigEntry<float> MaxTypingDelayConfig;
-        internal ConfigEntry<bool> ConversationThreadsConfig;
-        internal ConfigEntry<float> PartyReadDelaySecondsConfig;
-        internal ConfigEntry<float> ThreadReadDelaySecondsConfig;
-        internal ConfigEntry<int> MaxAutonomousThreadRepliesConfig;
-        internal ConfigEntry<bool> PauseAutonomousInCombatConfig;
-        internal ConfigEntry<string> InferenceModeConfig;
-        internal ConfigEntry<string> ReasoningModeConfig;
-        internal ConfigEntry<string> ReasoningModelConfig;
-        internal ConfigEntry<int> CpuThreadsConfig;
-        internal ConfigEntry<float> FrameHitchThresholdMsConfig;
-        internal ConfigEntry<float> KnowledgeDisagreementChanceConfig;
-        internal ConfigEntry<bool> VanillaChatterContinuityConfig;
-        internal ConfigEntry<float> VanillaChatterReplyChanceConfig;
-        internal ConfigEntry<string> SocialExpressionModeConfig;
-        internal ConfigEntry<string> SocialPerspectiveConfig;
-        internal ConfigEntry<string> SocialActivityPresetConfig;
-        internal ConfigEntry<string> AdaptiveTownZonesConfig;
+        internal DeepSimsConfigEntry<int> ConfigVersionConfig;
+        internal DeepSimsConfigEntry<bool> EnabledConfig;
+        internal DeepSimsConfigEntry<bool> CoopHostAuthorityConfig;
+        internal DeepSimsConfigEntry<int> OllamaFailureCooldownSecondsConfig;
+        internal DeepSimsConfigEntry<int> MaxDeepSimsConfig;
+        internal DeepSimsConfigEntry<bool> WholePartyDeepSimsConfig;
+        internal DeepSimsConfigEntry<float> PartyPollSecondsConfig;
+        internal DeepSimsConfigEntry<string> EndpointConfig;
+        internal DeepSimsConfigEntry<string> ModelConfig;
+        internal DeepSimsConfigEntry<int> TimeoutSecondsConfig;
+        internal DeepSimsConfigEntry<int> ContextWindowConfig;
+        internal DeepSimsConfigEntry<string> KeepAliveConfig;
+        internal DeepSimsConfigEntry<int> MaxReplyCharactersConfig;
+        internal DeepSimsConfigEntry<int> MaxHistoryMessagesConfig;
+        internal DeepSimsConfigEntry<bool> ApplyVanillaTypingConfig;
+        internal DeepSimsConfigEntry<bool> HybridWhispersConfig;
+        internal DeepSimsConfigEntry<string> ManualSlotsConfig;
+        internal DeepSimsConfigEntry<bool> WikiEnabledConfig;
+        internal DeepSimsConfigEntry<bool> AutoWikiLookupConfig;
+        internal DeepSimsConfigEntry<string> WikiApiUrlConfig;
+        internal DeepSimsConfigEntry<int> WikiTimeoutSecondsConfig;
+        internal DeepSimsConfigEntry<int> WikiMaxCharsConfig;
+        internal DeepSimsConfigEntry<bool> OfficialNewsEnabledConfig;
+        internal DeepSimsConfigEntry<string> OfficialNewsApiUrlConfig;
+        internal DeepSimsConfigEntry<bool> ExternalNewsEnabledConfig;
+        internal DeepSimsConfigEntry<bool> ExternalNewsAutoLookupConfig;
+        internal DeepSimsConfigEntry<string> ExternalNewsApiUrlConfig;
+        internal DeepSimsConfigEntry<string> ExternalNewsApiKeyConfig;
+        internal DeepSimsConfigEntry<int> ExternalNewsMaxResultsConfig;
+        internal DeepSimsConfigEntry<int> ExternalNewsTimeoutSecondsConfig;
+        internal DeepSimsConfigEntry<int> ExternalNewsMaxCharsConfig;
+        internal DeepSimsConfigEntry<int> ExternalNewsTtlMinutesConfig;
+        internal DeepSimsConfigEntry<bool> DirectorEnabledConfig;
+        internal DeepSimsConfigEntry<bool> EventChatterConfig;
+        internal DeepSimsConfigEntry<bool> IdleChatterConfig;
+        internal DeepSimsConfigEntry<bool> SeedingEnabledConfig;
+        internal DeepSimsConfigEntry<bool> SeedDiagnosticsConfig;
+        internal DeepSimsConfigEntry<float> SeedSilenceNormalConfig;
+        internal DeepSimsConfigEntry<float> SeedSilenceCampConfig;
+        internal DeepSimsConfigEntry<float> SeedSilenceRelaxConfig;
+        internal DeepSimsConfigEntry<float> SeedFatigueSecondsConfig;
+        internal DeepSimsConfigEntry<float> SeedRecentTopicWindowMinutesConfig;
+        internal DeepSimsConfigEntry<bool> SimToSimConfig;
+        internal DeepSimsConfigEntry<bool> PartyChatResponsesConfig;
+        internal DeepSimsConfigEntry<float> EventReactionChanceConfig;
+        internal DeepSimsConfigEntry<float> DuelReactionChanceConfig;
+        internal DeepSimsConfigEntry<float> EventCooldownSecondsConfig;
+        internal DeepSimsConfigEntry<bool> CampModeConfig;
+        internal DeepSimsConfigEntry<bool> CampmasterIntegrationConfig;
+        internal DeepSimsConfigEntry<float> CampEnterSecondsConfig;
+        internal DeepSimsConfigEntry<float> CampIdleMinSecondsConfig;
+        internal DeepSimsConfigEntry<float> CampIdleMaxSecondsConfig;
+        internal DeepSimsConfigEntry<float> SimToSimChanceConfig;
+        internal DeepSimsConfigEntry<float> IdleMinSecondsConfig;
+        internal DeepSimsConfigEntry<float> IdleMaxSecondsConfig;
+        internal DeepSimsConfigEntry<float> AutonomousCooldownSecondsConfig;
+        internal DeepSimsConfigEntry<float> TypingCharsPerSecondConfig;
+        internal DeepSimsConfigEntry<float> MinTypingDelayConfig;
+        internal DeepSimsConfigEntry<float> MaxTypingDelayConfig;
+        internal DeepSimsConfigEntry<bool> ConversationThreadsConfig;
+        internal DeepSimsConfigEntry<float> PartyReadDelaySecondsConfig;
+        internal DeepSimsConfigEntry<float> ThreadReadDelaySecondsConfig;
+        internal DeepSimsConfigEntry<int> MaxAutonomousThreadRepliesConfig;
+        internal DeepSimsConfigEntry<bool> PauseAutonomousInCombatConfig;
+        internal DeepSimsConfigEntry<string> InferenceModeConfig;
+        internal DeepSimsConfigEntry<string> ReasoningModeConfig;
+        internal DeepSimsConfigEntry<string> ReasoningModelConfig;
+        internal DeepSimsConfigEntry<int> CpuThreadsConfig;
+        internal DeepSimsConfigEntry<float> FrameHitchThresholdMsConfig;
+        internal DeepSimsConfigEntry<float> KnowledgeDisagreementChanceConfig;
+        internal DeepSimsConfigEntry<bool> VanillaChatterContinuityConfig;
+        internal DeepSimsConfigEntry<float> VanillaChatterReplyChanceConfig;
+        internal DeepSimsConfigEntry<string> SocialExpressionModeConfig;
+        internal DeepSimsConfigEntry<string> SocialPerspectiveConfig;
+        internal DeepSimsConfigEntry<string> SocialActivityPresetConfig;
+        internal DeepSimsConfigEntry<string> AdaptiveTownZonesConfig;
+        internal DeepSimsConfigEntry<bool> VerboseLoggingConfig;
+
+        private void InitializeConfigEntries()
+        {
+            ConfigVersionConfig = new DeepSimsConfigEntry<int>(delegate { return _settings.ConfigVersion; }, delegate(int value) { _settings.ConfigVersion = value; });
+            EnabledConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.Enabled; }, delegate(bool value) { _settings.Enabled = value; });
+            CoopHostAuthorityConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.CoopHostAuthority; }, delegate(bool value) { _settings.CoopHostAuthority = value; });
+            OllamaFailureCooldownSecondsConfig = new DeepSimsConfigEntry<int>(delegate { return _settings.OllamaFailureCooldownSeconds; }, delegate(int value) { _settings.OllamaFailureCooldownSeconds = value; });
+            MaxDeepSimsConfig = new DeepSimsConfigEntry<int>(delegate { return _settings.MaxDeepSims; }, delegate(int value) { _settings.MaxDeepSims = value; });
+            WholePartyDeepSimsConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.WholePartyDeepSims; }, delegate(bool value) { _settings.WholePartyDeepSims = value; });
+            PartyPollSecondsConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.PartyPollSeconds; }, delegate(float value) { _settings.PartyPollSeconds = value; });
+            EndpointConfig = new DeepSimsConfigEntry<string>(delegate { return _settings.Endpoint; }, delegate(string value) { _settings.Endpoint = value; });
+            ModelConfig = new DeepSimsConfigEntry<string>(delegate { return _settings.Model; }, delegate(string value) { _settings.Model = value; });
+            TimeoutSecondsConfig = new DeepSimsConfigEntry<int>(delegate { return _settings.TimeoutSeconds; }, delegate(int value) { _settings.TimeoutSeconds = value; });
+            ContextWindowConfig = new DeepSimsConfigEntry<int>(delegate { return _settings.ContextWindow; }, delegate(int value) { _settings.ContextWindow = value; });
+            KeepAliveConfig = new DeepSimsConfigEntry<string>(delegate { return _settings.KeepAlive; }, delegate(string value) { _settings.KeepAlive = value; });
+            MaxReplyCharactersConfig = new DeepSimsConfigEntry<int>(delegate { return _settings.MaxReplyCharacters; }, delegate(int value) { _settings.MaxReplyCharacters = value; });
+            MaxHistoryMessagesConfig = new DeepSimsConfigEntry<int>(delegate { return _settings.MaxHistoryMessages; }, delegate(int value) { _settings.MaxHistoryMessages = value; });
+            ApplyVanillaTypingConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.ApplyVanillaTyping; }, delegate(bool value) { _settings.ApplyVanillaTyping = value; });
+            HybridWhispersConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.HybridWhispers; }, delegate(bool value) { _settings.HybridWhispers = value; });
+            ManualSlotsConfig = new DeepSimsConfigEntry<string>(delegate { return _settings.ManualSlots; }, delegate(string value) { _settings.ManualSlots = value; });
+            WikiEnabledConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.WikiEnabled; }, delegate(bool value) { _settings.WikiEnabled = value; });
+            AutoWikiLookupConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.AutoWikiLookup; }, delegate(bool value) { _settings.AutoWikiLookup = value; });
+            WikiApiUrlConfig = new DeepSimsConfigEntry<string>(delegate { return _settings.WikiApiUrl; }, delegate(string value) { _settings.WikiApiUrl = value; });
+            WikiTimeoutSecondsConfig = new DeepSimsConfigEntry<int>(delegate { return _settings.WikiTimeoutSeconds; }, delegate(int value) { _settings.WikiTimeoutSeconds = value; });
+            WikiMaxCharsConfig = new DeepSimsConfigEntry<int>(delegate { return _settings.WikiMaxChars; }, delegate(int value) { _settings.WikiMaxChars = value; });
+            OfficialNewsEnabledConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.OfficialNewsEnabled; }, delegate(bool value) { _settings.OfficialNewsEnabled = value; });
+            OfficialNewsApiUrlConfig = new DeepSimsConfigEntry<string>(delegate { return _settings.OfficialNewsApiUrl; }, delegate(string value) { _settings.OfficialNewsApiUrl = value; });
+            ExternalNewsEnabledConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.ExternalNewsEnabled; }, delegate(bool value) { _settings.ExternalNewsEnabled = value; });
+            ExternalNewsAutoLookupConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.ExternalNewsAutoLookup; }, delegate(bool value) { _settings.ExternalNewsAutoLookup = value; });
+            ExternalNewsApiUrlConfig = new DeepSimsConfigEntry<string>(delegate { return _settings.ExternalNewsApiUrl; }, delegate(string value) { _settings.ExternalNewsApiUrl = value; });
+            ExternalNewsApiKeyConfig = new DeepSimsConfigEntry<string>(delegate { return _settings.ExternalNewsApiKey; }, delegate(string value) { _settings.ExternalNewsApiKey = value; });
+            ExternalNewsMaxResultsConfig = new DeepSimsConfigEntry<int>(delegate { return _settings.ExternalNewsMaxResults; }, delegate(int value) { _settings.ExternalNewsMaxResults = value; });
+            ExternalNewsTimeoutSecondsConfig = new DeepSimsConfigEntry<int>(delegate { return _settings.ExternalNewsTimeoutSeconds; }, delegate(int value) { _settings.ExternalNewsTimeoutSeconds = value; });
+            ExternalNewsMaxCharsConfig = new DeepSimsConfigEntry<int>(delegate { return _settings.ExternalNewsMaxChars; }, delegate(int value) { _settings.ExternalNewsMaxChars = value; });
+            ExternalNewsTtlMinutesConfig = new DeepSimsConfigEntry<int>(delegate { return _settings.ExternalNewsTtlMinutes; }, delegate(int value) { _settings.ExternalNewsTtlMinutes = value; });
+            DirectorEnabledConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.DirectorEnabled; }, delegate(bool value) { _settings.DirectorEnabled = value; });
+            EventChatterConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.EventChatter; }, delegate(bool value) { _settings.EventChatter = value; });
+            IdleChatterConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.IdleChatter; }, delegate(bool value) { _settings.IdleChatter = value; });
+            SeedingEnabledConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.SeedingEnabled; }, delegate(bool value) { _settings.SeedingEnabled = value; });
+            SeedDiagnosticsConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.SeedDiagnostics; }, delegate(bool value) { _settings.SeedDiagnostics = value; });
+            SeedSilenceNormalConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.SeedSilenceNormal; }, delegate(float value) { _settings.SeedSilenceNormal = value; });
+            SeedSilenceCampConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.SeedSilenceCamp; }, delegate(float value) { _settings.SeedSilenceCamp = value; });
+            SeedSilenceRelaxConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.SeedSilenceRelax; }, delegate(float value) { _settings.SeedSilenceRelax = value; });
+            SeedFatigueSecondsConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.SeedFatigueSeconds; }, delegate(float value) { _settings.SeedFatigueSeconds = value; });
+            SeedRecentTopicWindowMinutesConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.SeedRecentTopicWindowMinutes; }, delegate(float value) { _settings.SeedRecentTopicWindowMinutes = value; });
+            SimToSimConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.SimToSim; }, delegate(bool value) { _settings.SimToSim = value; });
+            PartyChatResponsesConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.PartyChatResponses; }, delegate(bool value) { _settings.PartyChatResponses = value; });
+            EventReactionChanceConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.EventReactionChance; }, delegate(float value) { _settings.EventReactionChance = value; });
+            DuelReactionChanceConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.DuelReactionChance; }, delegate(float value) { _settings.DuelReactionChance = value; });
+            EventCooldownSecondsConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.EventCooldownSeconds; }, delegate(float value) { _settings.EventCooldownSeconds = value; });
+            CampModeConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.CampMode; }, delegate(bool value) { _settings.CampMode = value; });
+            CampmasterIntegrationConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.CampmasterIntegration; }, delegate(bool value) { _settings.CampmasterIntegration = value; });
+            CampEnterSecondsConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.CampEnterSeconds; }, delegate(float value) { _settings.CampEnterSeconds = value; });
+            CampIdleMinSecondsConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.CampIdleMinSeconds; }, delegate(float value) { _settings.CampIdleMinSeconds = value; });
+            CampIdleMaxSecondsConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.CampIdleMaxSeconds; }, delegate(float value) { _settings.CampIdleMaxSeconds = value; });
+            SimToSimChanceConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.SimToSimChance; }, delegate(float value) { _settings.SimToSimChance = value; });
+            IdleMinSecondsConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.IdleMinSeconds; }, delegate(float value) { _settings.IdleMinSeconds = value; });
+            IdleMaxSecondsConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.IdleMaxSeconds; }, delegate(float value) { _settings.IdleMaxSeconds = value; });
+            AutonomousCooldownSecondsConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.AutonomousCooldownSeconds; }, delegate(float value) { _settings.AutonomousCooldownSeconds = value; });
+            TypingCharsPerSecondConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.TypingCharsPerSecond; }, delegate(float value) { _settings.TypingCharsPerSecond = value; });
+            MinTypingDelayConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.MinTypingDelay; }, delegate(float value) { _settings.MinTypingDelay = value; });
+            MaxTypingDelayConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.MaxTypingDelay; }, delegate(float value) { _settings.MaxTypingDelay = value; });
+            ConversationThreadsConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.ConversationThreads; }, delegate(bool value) { _settings.ConversationThreads = value; });
+            PartyReadDelaySecondsConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.PartyReadDelaySeconds; }, delegate(float value) { _settings.PartyReadDelaySeconds = value; });
+            ThreadReadDelaySecondsConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.ThreadReadDelaySeconds; }, delegate(float value) { _settings.ThreadReadDelaySeconds = value; });
+            MaxAutonomousThreadRepliesConfig = new DeepSimsConfigEntry<int>(delegate { return _settings.MaxAutonomousThreadReplies; }, delegate(int value) { _settings.MaxAutonomousThreadReplies = value; });
+            PauseAutonomousInCombatConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.PauseAutonomousInCombat; }, delegate(bool value) { _settings.PauseAutonomousInCombat = value; });
+            InferenceModeConfig = new DeepSimsConfigEntry<string>(delegate { return _settings.InferenceMode; }, delegate(string value) { _settings.InferenceMode = value; });
+            ReasoningModeConfig = new DeepSimsConfigEntry<string>(delegate { return _settings.ReasoningMode; }, delegate(string value) { _settings.ReasoningMode = value; });
+            ReasoningModelConfig = new DeepSimsConfigEntry<string>(delegate { return _settings.ReasoningModel; }, delegate(string value) { _settings.ReasoningModel = value; });
+            CpuThreadsConfig = new DeepSimsConfigEntry<int>(delegate { return _settings.CpuThreads; }, delegate(int value) { _settings.CpuThreads = value; });
+            FrameHitchThresholdMsConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.FrameHitchThresholdMs; }, delegate(float value) { _settings.FrameHitchThresholdMs = value; });
+            KnowledgeDisagreementChanceConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.KnowledgeDisagreementChance; }, delegate(float value) { _settings.KnowledgeDisagreementChance = value; });
+            VanillaChatterContinuityConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.VanillaChatterContinuity; }, delegate(bool value) { _settings.VanillaChatterContinuity = value; });
+            VanillaChatterReplyChanceConfig = new DeepSimsConfigEntry<float>(delegate { return _settings.VanillaChatterReplyChance; }, delegate(float value) { _settings.VanillaChatterReplyChance = value; });
+            SocialExpressionModeConfig = new DeepSimsConfigEntry<string>(delegate { return _settings.SocialExpressionMode; }, delegate(string value) { _settings.SocialExpressionMode = value; });
+            SocialPerspectiveConfig = new DeepSimsConfigEntry<string>(delegate { return _settings.SocialPerspective; }, delegate(string value) { _settings.SocialPerspective = value; });
+            SocialActivityPresetConfig = new DeepSimsConfigEntry<string>(delegate { return _settings.SocialActivityPreset; }, delegate(string value) { _settings.SocialActivityPreset = value; });
+            AdaptiveTownZonesConfig = new DeepSimsConfigEntry<string>(delegate { return _settings.AdaptiveTownZones; }, delegate(string value) { _settings.AdaptiveTownZones = value; });
+            VerboseLoggingConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.VerboseLogging; }, delegate(bool value) { _settings.VerboseLogging = value; });
+        }
 
         private void Awake()
         {
             Instance = this;
-            ConfigVersionConfig = Config.Bind("General", "ConfigVersion", 0, "Internal. Tracks which one-time default migrations have already been applied. Do not edit.");
-            EnabledConfig = Config.Bind("General", "Enabled", true, "Enable the Deep Sims enhancement layer.");
-            CoopHostAuthorityConfig = Config.Bind("Co-op", "HostAuthority", false, "When Erenshor COOP is installed, enable Deep Sims only on the host PC. Leave false on every client; this mod never requires clients to install Ollama.");
-            OllamaFailureCooldownSecondsConfig = Config.Bind("Ollama", "FailureCooldownSeconds", 60, "After Ollama is unavailable, wait this many seconds before another Deep Sims request. Gameplay and vanilla chat continue normally.");
-            MaxDeepSimsConfig = Config.Bind("General", "MaxDeepSims", 5, "Maximum Deep Sims when WholePartyDeepSims is disabled. Hard-capped at 5.");
-            WholePartyDeepSimsConfig = Config.Bind("General", "WholePartyDeepSims", true, "Enhance every Sim in the current normal party, up to a hard cap of 5. This prevents a full raid from becoming Deep Sims.");
-            PartyPollSecondsConfig = Config.Bind("General", "PartyPollSeconds", 3.0f, "How often DeepSims re-checks current party membership. Deep Sims keeps the cached scene scan while building fresh per-party-member snapshots at prompt time; no extra FindObjectsOfType scan is added.");
-            ManualSlotsConfig = Config.Bind("General", "ManualSlots", "", "Diagnostic fallback: comma-separated Sim names. Leave blank for automatic party detection.");
-            HybridWhispersConfig = Config.Bind("Dialogue", "HybridWhispers", true, "Let recognizable vanilla gameplay whisper intents pass to Erenshor; route other whispers to the LLM.");
-            ApplyVanillaTypingConfig = Config.Bind("Dialogue", "ApplyVanillaTypingStyle", true, "Try to pass LLM replies through the Sim's own PersonalizeString typing quirks.");
-            MaxReplyCharactersConfig = Config.Bind("Dialogue", "MaxReplyCharacters", 280, "Hard cap on a Deep Sim reply.");
-            MaxHistoryMessagesConfig = Config.Bind("Dialogue", "MaxHistoryMessages", 14, "Recent conversation messages kept per Sim.");
-            EndpointConfig = Config.Bind("Ollama", "Endpoint", "http://localhost:11434/api/chat", "Ollama /api/chat endpoint.");
-            ModelConfig = Config.Bind("Ollama", "Model", "qwen3.5:2b", "One shared local model used by all Deep Sims. Recommended: qwen3.5:2b.");
-            TimeoutSecondsConfig = Config.Bind("Ollama", "TimeoutSeconds", 45, "Maximum wait for one local model reply.");
-            ContextWindowConfig = Config.Bind("Ollama", "ContextWindow", 2048, "Requested local model context window. 2048 is the lightweight default for short MMO chat; increase if you use a larger custom model/prompt.");
-            KeepAliveConfig = Config.Bind("Ollama", "KeepAlive", "30m", "How long Ollama keeps the shared model loaded.");
-            WikiEnabledConfig = Config.Bind("Wiki", "Enabled", true, "Allow DeepSims to query the Erenshor community wiki over HTTPS.");
-            AutoWikiLookupConfig = Config.Bind("Wiki", "AutoLookup", true, "Automatically query the wiki for clear game-knowledge questions sent to a Deep Sim.");
-            WikiApiUrlConfig = Config.Bind("Wiki", "ApiUrl", "https://erenshor.wiki.gg/api.php", "MediaWiki Action API endpoint used for Erenshor lookups.");
-            WikiTimeoutSecondsConfig = Config.Bind("Wiki", "TimeoutSeconds", 8, "Maximum wait for an Erenshor wiki request.");
-            WikiMaxCharsConfig = Config.Bind("Wiki", "MaxExtractCharacters", 1200, "Maximum wiki/news extract supplied to the local model.");
-            OfficialNewsEnabledConfig = Config.Bind("Knowledge", "OfficialSteamNews", true, "Use Valve's public Steam-news API for current Erenshor patch/update/expansion questions.");
-            OfficialNewsApiUrlConfig = Config.Bind("Knowledge", "SteamNewsApiUrl", "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?appid=2382520&count=12&maxlength=1200", "Valve ISteamNews endpoint for Erenshor (AppID 2382520).");
-            ExternalNewsEnabledConfig = Config.Bind("ExternalNews", "Enabled", true, "Allow DeepSims to look up recent real-world news when a player explicitly asks about something current outside Erenshor. This is separate from the Erenshor wiki and official Erenshor news.");
-            ExternalNewsAutoLookupConfig = Config.Bind("ExternalNews", "AutoLookup", true, "Automatically trigger an external news search for clear current-events questions (e.g. 'what's going on with NASA?'). /dsxnews <query> always works while ExternalNews is enabled.");
-            ExternalNewsApiUrlConfig = Config.Bind("ExternalNews", "Provider", "https://api.gdeltproject.org/api/v2/doc/doc", "GDELT Doc 2.0 endpoint override. This mod always tries the free, keyless Google News RSS search first, then falls back to this GDELT endpoint - this setting only overrides the GDELT fallback's URL, it does not select between providers. Only a documented HTTPS API should go here; this mod never scrapes arbitrary HTML.");
-            ExternalNewsApiKeyConfig = Config.Bind("ExternalNews", "ApiKey", "", "Optional API key for a keyed news provider. Unused by either built-in keyless provider (Google News RSS, GDELT). Never logged, never exported. Leave blank unless you have configured a provider that requires one.");
-            ExternalNewsMaxResultsConfig = Config.Bind("ExternalNews", "MaxResults", 4, "Maximum recent articles retrieved per external news search (1-5).");
-            ExternalNewsTimeoutSecondsConfig = Config.Bind("ExternalNews", "TimeoutSeconds", 6, "Maximum wall-clock time for the WHOLE external-news lookup (primary + fallback provider combined), not per provider.");
-            ExternalNewsMaxCharsConfig = Config.Bind("ExternalNews", "MaxContextCharacters", 900, "Maximum combined external-news extract supplied to the local model.");
-            ExternalNewsTtlMinutesConfig = Config.Bind("ExternalNews", "ConversationTtlMinutes", 6, "How long a retrieved external-news topic stays available for conversational follow-up before it expires and a fresh search is required.");
-
-            DirectorEnabledConfig = Config.Bind("Social Director", "Enabled", true, "Allow Deep Sims to occasionally speak without being directly prompted.");
-            EventChatterConfig = Config.Bind("Social Director", "EventChatter", true, "Allow reactions to observed game events such as deaths, levels, quests, and zoning.");
-            IdleChatterConfig = Config.Bind("Social Director", "IdleChatter", true, "Allow rare quiet-moment group chatter.");
-            SimToSimConfig = Config.Bind("Social Director", "SimToSimReplies", true, "Allow a second Deep Sim to occasionally reply to another Deep Sim in group chat.");
-            PartyChatResponsesConfig = Config.Bind("Social Director", "PartyChatResponses", true, "Let normal player /p party-chat messages naturally prompt Deep Sim replies without requiring /dw.");
-            EventReactionChanceConfig = Config.Bind("Social Director", "EventReactionChance", 0.70f, "Global multiplier from 0 to 1 for event reactions. The model can still choose silence.");
-            DuelReactionChanceConfig = Config.Bind("Social Director", "DuelReactionChance", 1.00f, "Chance from 0 to 1 to ask a Deep Sim for a short reaction after a completed friendly practice duel. The duel result is always saved as verified memory.");
-            EventCooldownSecondsConfig = Config.Bind("Social Director", "EventCooldownSeconds", 30f, "Minimum seconds between verified event-conversation opportunities (effective minimum 30 seconds). This is separate from idle/banter cooldowns.");
-            CampModeConfig = Config.Bind("Camp Mode", "Enabled", true, "Automatically enter social camp mode when the player remains seated/meditating outside combat. Ignored when Erenshor Campmaster is detected; see CampmasterIntegration.");
-            CampmasterIntegrationConfig = Config.Bind("Camp Mode", "CampmasterIntegration", true, "When the optional Erenshor Campmaster mod is present, use its verified Hunt Camp recognition instead of sitting detection, and add its verified facts to prompts.");
-            CampEnterSecondsConfig = Config.Bind("Camp Mode", "EnterAfterSeconds", 8f, "Seconds the player must remain seated outside combat before automatic camp mode begins.");
-            CampIdleMinSecondsConfig = Config.Bind("Camp Mode", "ChatterMinSeconds", 12f, "Minimum quiet time before camp chatter becomes possible.");
-            CampIdleMaxSecondsConfig = Config.Bind("Camp Mode", "ChatterMaxSeconds", 40f, "Quiet time at which the next camp chatter check becomes strongly encouraged.");
-            SimToSimChanceConfig = Config.Bind("Social Director", "SimToSimReplyChance", 0.60f, "Chance from 0 to 1 that a generated group line may get one natural reply from another Deep Sim.");
-            IdleMinSecondsConfig = Config.Bind("Social Director", "IdleMinSeconds", 90f, "Seconds of party-chat silence before spontaneous chatter starts becoming possible.");
-            IdleMaxSecondsConfig = Config.Bind("Social Director", "IdleMaxSeconds", 300f, "At this many seconds of party-chat silence, the next spontaneous chatter evaluation is strongly encouraged.");
-            AutonomousCooldownSecondsConfig = Config.Bind("Social Director", "AutonomousCooldownSeconds", 35f, "Minimum time between autonomous Deep Sim conversation opportunities.");
-            TypingCharsPerSecondConfig = Config.Bind("Social Director", "TypingCharsPerSecond", 22f, "Approximate simulated typing speed used only to delay display of generated group chat.");
-            MinTypingDelayConfig = Config.Bind("Social Director", "MinTypingDelaySeconds", 0.7f, "Minimum simulated typing delay for autonomous group chat.");
-            MaxTypingDelayConfig = Config.Bind("Social Director", "MaxTypingDelaySeconds", 3.5f, "Maximum simulated typing delay for autonomous group chat.");
-            ConversationThreadsConfig = Config.Bind("Social Director", "ConversationThreads", true, "Allow context-aware multi-turn party conversations. Player messages can continue a conversation; AI-only runs are safety-capped.");
-            PartyReadDelaySecondsConfig = Config.Bind("Social Director", "PartyReadDelaySeconds", 0.55f, "Brief delay before answering party chat so nearby lines can be read as one banter turn. Newer player messages cancel stale work.");
-            ThreadReadDelaySecondsConfig = Config.Bind("Social Director", "ThreadReadDelaySeconds", 0.9f, "Brief delay after a Deep Sim reply becomes visible before deciding on the next line in the same thread. Lets the player, a vanilla Sim, or combat change the conversation before the next line is generated.");
-            MaxAutonomousThreadRepliesConfig = Config.Bind("Social Director", "MaxAutonomousThreadReplies", 4, "Maximum AI messages in one autonomous party-chat thread before Deep Sims waits for the player. Hard-capped at 6. This is an upper bound, not a target: threads should stop earlier whenever there is no natural hook to continue.");
-            PauseAutonomousInCombatConfig = Config.Bind("Performance", "PauseAutonomousAIInCombat", true, "Do not start idle/event/banter LLM generations during active or very recent combat. Player-initiated /p and /dw replies still work.");
-            InferenceModeConfig = Config.Bind("Performance", "InferenceMode", "Auto", "Ollama runner mode: Auto lets Ollama choose, CPU forces num_gpu=0, GPU requests maximum GPU offload (num_gpu=-1). Changing this may reload the model.");
-            ReasoningModeConfig = Config.Bind("Performance", "ReasoningMode", "Selective", "Higher-capability model routing: Off always uses Model, Selective uses ReasoningModel only for factual/history/grounding-correction requests, and Always uses ReasoningModel for every LLM line.");
-            ReasoningModelConfig = Config.Bind("Performance", "ReasoningModel", "qwen3.5:4b", "Optional larger Ollama model for reasoning-heavy requests. If it is blank, matches Model, or fails, Deep Sims uses the primary Model. Native think=true remains disabled because supported Qwen 3.5 builds may exhaust the reply budget without producing final text.");
-            CpuThreadsConfig = Config.Bind("Performance", "CpuThreads", 0, "CPU inference thread count sent to Ollama. 0 lets Ollama choose. Mainly useful with InferenceMode=CPU.");
-            FrameHitchThresholdMsConfig = Config.Bind("Performance", "FrameHitchThresholdMs", 100f, "Frame duration counted as a hitch for /dsperf correlation. Hitches while the game window is unfocused are ignored.");
-            KnowledgeDisagreementChanceConfig = Config.Bind("Social Director", "KnowledgeDisagreementChance", 0.12f, "Chance from 0 to 1 that a general party wiki/news question starts with one tentative or incomplete Sim answer before another Sim corrects/clarifies it. The verified source remains authoritative; set 0 to disable.");
-            VanillaChatterContinuityConfig = Config.Bind("Social Director", "VanillaChatterContinuity", true, "Let Deep Sims hear normal Erenshor party chatter and occasionally continue a substantive vanilla Sim line as part of the same conversation.");
-            VanillaChatterReplyChanceConfig = Config.Bind("Social Director", "VanillaChatterReplyChance", 0.18f, "Base chance from 0 to 1 that a substantive vanilla Sim party-chat line gets a Deep Sim continuation. Greetings, acknowledgements, and combat command chatter are much less likely or ignored.");
-            SocialExpressionModeConfig = Config.Bind("Social Director", "ExpressionMode", "Auto", "Autonomous social expression: Auto, LLM, Templates, or Off. Auto uses templates for ritual chatter and while Ollama is unavailable.");
-            // Orthogonal to ExpressionMode: this is WHO speaks, not HOW the line is produced.
-            // Default stays MMO so existing installs are unchanged until the player opts in.
-            SocialPerspectiveConfig = Config.Bind("Social Director", "Perspective", "MMO", "Social perspective: MMO or Roleplay. MMO keeps Sims talking like players in an old-school MMO. Roleplay makes them speak as the adventurers they represent. This does not change gameplay, grounding, or how often they talk.");
-            SocialPerspectiveState.Current = SocialPerspective.Parse(SocialPerspectiveConfig.Value);
-            SocialActivityPresetConfig = Config.Bind("Social Director", "ActivityPreset", "Adaptive", "Autonomous social activity: Adaptive chooses a temporary Quiet/Normal/Lively party mood from personality and verified context; Quiet, Normal, and Lively are manual overrides.");
-            AdaptiveTownZonesConfig = Config.Bind("Social Director", "AdaptiveTownZones", "Port Azure", "Comma-separated verified scene names that receive a social town boost in Adaptive activity mode.");
-
-            SeedingEnabledConfig = Config.Bind("Conversation Seeding", "Enabled", true, "Choose a grounded subject before speaking during a quiet moment. When off, ambient chatter is disabled entirely rather than falling back to unseeded chatter.");
-            SeedDiagnosticsConfig = Config.Bind("Conversation Seeding", "Diagnostics", true, "Record per-candidate score components for /dsseeds recent. Turning this off keeps the decision history but drops the score breakdown.");
-            SeedSilenceNormalConfig = Config.Bind("Conversation Seeding", "SilenceNormal", 42f, "Score an ambient subject must beat to be worth saying outside camp. Higher means quieter.");
-            SeedSilenceCampConfig = Config.Bind("Conversation Seeding", "SilenceCamp", 38f, "Score an ambient subject must beat during camp downtime. Higher means quieter.");
-            SeedSilenceRelaxConfig = Config.Bind("Conversation Seeding", "SilenceRelax", 34f, "Score a Relax subject must beat during explicit Relax downtime. Higher means quieter.");
-            SeedFatigueSecondsConfig = Config.Bind("Conversation Seeding", "FatigueSeconds", 300f, "How long a recently discussed subject stays penalized.");
-            SeedRecentTopicWindowMinutesConfig = Config.Bind("Conversation Seeding", "RecentTopicWindowMinutes", 10f, "Window used to count repeated party-wide use of the same subject.");
-
+            _log = new LunarisDeepSimsLog(Logging);
+            _settings = new DeepSimsSettings();
+            Config.Register(ref _settings);
+            InitializeConfigEntries();
+            SyncSocialPerspectiveFromConfig();
+            DeepSimsPaths.EnsureDataDirectories(Logger);
             bool configChanged = false;
 
             // Always-on sanitization of values that are simply invalid rather than merely outdated.
@@ -393,7 +404,7 @@ namespace ErenshorDeepSims
             }
             if (configChanged) Config.Save();
 
-            string memoryDir = Path.Combine(Paths.ConfigPath, "DeepSims", "Memory");
+            string memoryDir = DeepSimsPaths.MemoryDirectory;
             Directory.CreateDirectory(memoryDir);
             _memory = new MemoryStore(memoryDir, Logger);
             _slots = new DeepSlotManager(_memory, Logger);
@@ -414,14 +425,21 @@ namespace ErenshorDeepSims
             Logger.LogInfo(PluginName + " " + PluginVersion + " loaded. Whole-party Deep Sim enhancement enabled (hard cap 5).");
         }
 
+        private bool EnqueueMainThread(Action action)
+        {
+            if (action == null) return false;
+            lock (_requestQueueLock)
+            {
+                if (_requestStopping) return false;
+                _mainThreadActions.Enqueue(action);
+                return true;
+            }
+        }
+
         private void OnDestroy()
         {
-            // Shutdown order: stop admitting new work first, then invalidate the live conversation
-            // generation (the same generation-guard architecture the stale-turn fix uses) so any
-            // in-flight background Ollama call that has already passed its earlier stale checks fails
-            // its next one and resolves to NO_MESSAGE, and any already-queued typing-delay line is
-            // dropped rather than displayed. This never blocks on the pending call itself - it just
-            // ensures nothing it eventually returns can reach WriteChat after shutdown began.
+            // Lunaris can unload/reload plugins while Erenshor is running. Stop admission first so
+            // no worker can queue new UI/chat work after teardown begins.
             lock (_requestQueueLock)
             {
                 _requestStopping = true;
@@ -429,12 +447,52 @@ namespace ErenshorDeepSims
                 _pendingWhisperWork.Clear();
                 _pendingAutonomousWork = null;
             }
+
             try { AdvanceConversationGeneration(true); } catch { }
-            // Order matters: FinishNow records the closing outing summaries, then everything still
-            // pending from this session is written out.
+            try { if (_groupMessages != null) _groupMessages.Clear(); } catch { }
+
+            // Release queued closures immediately. Late workers use EnqueueMainThread(), which shares
+            // _requestQueueLock and therefore fails closed once _requestStopping is set.
+            try
+            {
+                Action ignored;
+                while (_mainThreadActions.TryDequeue(out ignored)) { }
+            }
+            catch { }
+
+            // Finish/flush only mod-owned sidecar state. Never touch Erenshor save files here.
             try { if (_telemetry != null) _telemetry.FinishNow(); } catch { }
             try { if (_memory != null) _memory.Shutdown(); } catch { }
-            if (_harmony != null) _harmony.UnpatchSelf();
+
+            // Process-wide AppDomain event handlers must be removed explicitly or they can retain a
+            // delegate into the old assembly after Lunaris destroys the plugin GameObject.
+            try { CoopCompatibility.Shutdown(); } catch { }
+            try { CampmasterBridge.Shutdown(); } catch { }
+
+            // Harmony is intentionally retained for verified game hooks/command parsing; Lunaris
+            // unload correctness requires removing every patch owned by this instance.
+            try { if (_harmony != null) _harmony.UnpatchSelf(); } catch { }
+            _harmony = null;
+
+            // Do not Dispose the semaphore while an already-running request may still reach Release().
+            // The generation/request-stopping guards make late work inert without blocking Unity.
+            _emittingDeepSimChat = false;
+            SocialPerspectiveState.Current = SocialPerspective.Default;
+            RoleplayFactionContext.Clear();
+            RoleplayClassContext.Clear();
+            if (ReferenceEquals(Instance, this)) Instance = null;
+        }
+
+        private void SyncSocialPerspectiveFromConfig()
+        {
+            SocialPerspectiveMode next = SocialPerspective.Parse(SocialPerspectiveConfig == null ? null : SocialPerspectiveConfig.Value);
+            if (SocialPerspectiveState.Current == next) return;
+            SocialPerspectiveState.Current = next;
+            if (!SocialPerspectiveState.RoleplayActive)
+            {
+                RoleplayFactionContext.Clear();
+                RoleplayClassContext.Clear();
+            }
         }
 
         private void Update()
@@ -447,6 +505,7 @@ namespace ErenshorDeepSims
             // patches elsewhere in this file.
             try
             {
+                SyncSocialPerspectiveFromConfig();
                 ObserveFramePerformance();
 
                 Action action;
@@ -1118,7 +1177,7 @@ namespace ErenshorDeepSims
                     if (string.IsNullOrWhiteSpace(reply)) reply = "...think my chat ate that.";
                     string rawReply = reply;
 
-                    _mainThreadActions.Enqueue(delegate
+                    EnqueueMainThread(delegate
                     {
                         try
                         {
@@ -1154,7 +1213,7 @@ namespace ErenshorDeepSims
                     Logger.LogError("LLM reply failed for " + requestSim.Name + ": " + ex);
                     string shortError = ex.Message == null ? "unknown error" : ex.Message;
                     if (shortError.Length > 150) shortError = shortError.Substring(0, 150) + "...";
-                    if (!stale()) _mainThreadActions.Enqueue(delegate { WriteChat("[DeepSims] " + requestSim.Name + " could not reply: " + shortError, "red"); });
+                    if (!stale()) EnqueueMainThread(delegate { WriteChat("[DeepSims] " + requestSim.Name + " could not reply: " + shortError, "red"); });
                 }
                 finally { _inferenceGate.Release(); }
             });
@@ -1343,7 +1402,7 @@ namespace ErenshorDeepSims
                 {
                     if (gateHeld) _inferenceGate.Release();
                     string deliver = string.IsNullOrWhiteSpace(finalLine) ? fallback : finalLine;
-                    _mainThreadActions.Enqueue(delegate { try { completed(deliver); } catch { } });
+                    EnqueueMainThread(delegate { try { completed(deliver); } catch { } });
                 }
             });
         }
@@ -1422,11 +1481,9 @@ namespace ErenshorDeepSims
 
             SocialPerspectiveMode mode = enable ? SocialPerspectiveMode.Roleplay : SocialPerspectiveMode.Mmo;
             SocialPerspectiveState.Current = mode;
-            if (SocialPerspectiveConfig != null)
-            {
-                SocialPerspectiveConfig.Value = SocialPerspective.Describe(mode);
-                Config.Save();
-            }
+            SocialPerspectiveConfig.Value = SocialPerspective.Describe(mode);
+            Config.Save();
+            if (!enable) { RoleplayFactionContext.Clear(); RoleplayClassContext.Clear(); }
             WriteChat("[DeepSims Roleplay] Perspective set to " + SocialPerspective.Describe(mode) +
                 (enable ? ". Sims now speak as the adventurers they represent." : ". Sims speak as MMO players again."), "yellow");
         }
@@ -2508,7 +2565,7 @@ namespace ErenshorDeepSims
                 catch (Exception ex)
                 {
                     Logger.LogDebug("Verified event LLM stopped: " + ex.Message);
-                    _mainThreadActions.Enqueue(delegate
+                    EnqueueMainThread(delegate
                     {
                         if (ConversationTurnGuard.IsStale(conversationGeneration, CurrentConversationGeneration()))
                         {
@@ -2669,7 +2726,7 @@ namespace ErenshorDeepSims
                     if (IsNoMessage(first))
                     {
                         if (forceMessage)
-                            _mainThreadActions.Enqueue(delegate { WriteChat("[DeepSims] Forced social test returned NO_MESSAGE.", "yellow"); });
+                            EnqueueMainThread(delegate { WriteChat("[DeepSims] Forced social test returned NO_MESSAGE.", "yellow"); });
                         return;
                     }
 
@@ -2698,7 +2755,7 @@ namespace ErenshorDeepSims
                 {
                     Logger.LogWarning("Autonomous Deep Sim chatter failed: " + ex.Message);
                     if (!forceMessage)
-                        _mainThreadActions.Enqueue(delegate
+                        EnqueueMainThread(delegate
                         {
                             if (ConversationTurnGuard.IsStale(conversationGeneration, CurrentConversationGeneration()))
                             {
@@ -3547,6 +3604,7 @@ namespace ErenshorDeepSims
 
         private async Task RequestPumpAsync()
         {
+            if (_requestStopping) return;
             while (true)
             {
                 RequestWork work = null;
@@ -3700,7 +3758,7 @@ namespace ErenshorDeepSims
         {
             try
             {
-                string root = Path.Combine(Paths.ConfigPath, "DeepSims", "Exports");
+                string root = DeepSimsPaths.ExportDirectory;
                 Directory.CreateDirectory(root);
                 string stamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
                 string path = Path.Combine(root, "DeepSims_" + stamp + "_session.txt");
@@ -3746,7 +3804,7 @@ namespace ErenshorDeepSims
                 string status;
                 try { status = await _ollama.GetStatusAsync(EndpointConfig.Value, ModelConfig.Value, 5).ConfigureAwait(false); }
                 catch (Exception ex) { status = "Ollama unavailable: " + ex.Message; }
-                _mainThreadActions.Enqueue(delegate
+                EnqueueMainThread(delegate
                 {
                     RefreshSlots();
                     WriteChat("[DeepSims] " + status, status.StartsWith("Ollama unavailable") ? "red" : "lightblue");
@@ -3778,7 +3836,7 @@ namespace ErenshorDeepSims
                 try
                 {
                     WikiResult result = await _wiki.SearchAsync(WikiApiUrlConfig.Value, query, Math.Max(2, WikiTimeoutSecondsConfig.Value), Math.Max(300, WikiMaxCharsConfig.Value)).ConfigureAwait(false);
-                    _mainThreadActions.Enqueue(delegate
+                    EnqueueMainThread(delegate
                     {
                         if (result != null && result.Found)
                         {
@@ -3793,7 +3851,7 @@ namespace ErenshorDeepSims
                 {
                     string detail = ex.Message == null ? "unknown error" : ex.Message;
                     if (detail.Length > 180) detail = detail.Substring(0, 180) + "...";
-                    _mainThreadActions.Enqueue(delegate { WriteChat("[DeepSims Wiki] Lookup failed: " + detail, "red"); });
+                    EnqueueMainThread(delegate { WriteChat("[DeepSims Wiki] Lookup failed: " + detail, "red"); });
                 }
             });
         }
@@ -3808,7 +3866,7 @@ namespace ErenshorDeepSims
                 {
                     WikiResult result = await _news.SearchAsync(OfficialNewsApiUrlConfig.Value, q,
                         Math.Max(2, WikiTimeoutSecondsConfig.Value), Math.Max(400, WikiMaxCharsConfig.Value)).ConfigureAwait(false);
-                    _mainThreadActions.Enqueue(delegate
+                    EnqueueMainThread(delegate
                     {
                         if (result != null && result.Found)
                         {
@@ -3823,7 +3881,7 @@ namespace ErenshorDeepSims
                 {
                     string detail = ex.Message == null ? "unknown error" : ex.Message;
                     if (detail.Length > 180) detail = detail.Substring(0, 180) + "...";
-                    _mainThreadActions.Enqueue(delegate { WriteChat("[DeepSims News] Lookup failed: " + detail, "red"); });
+                    EnqueueMainThread(delegate { WriteChat("[DeepSims News] Lookup failed: " + detail, "red"); });
                 }
             });
         }
@@ -3845,7 +3903,7 @@ namespace ErenshorDeepSims
                         _lastExternalNewsUtc = DateTime.UtcNow;
                     }
                     WikiResult result = bundle == null ? null : bundle.Combined;
-                    _mainThreadActions.Enqueue(delegate
+                    EnqueueMainThread(delegate
                     {
                         // Deterministic/no-LLM display path: works whether or not Ollama is available.
                         if (result != null && result.Found)
@@ -3869,7 +3927,7 @@ namespace ErenshorDeepSims
                 {
                     string detail = ex.Message == null ? "unknown error" : ex.Message;
                     if (detail.Length > 180) detail = detail.Substring(0, 180) + "...";
-                    _mainThreadActions.Enqueue(delegate { WriteChat("[DeepSims News] External lookup failed: " + detail, "red"); });
+                    EnqueueMainThread(delegate { WriteChat("[DeepSims News] External lookup failed: " + detail, "red"); });
                 }
             });
         }
@@ -3909,13 +3967,13 @@ namespace ErenshorDeepSims
                     messages.Add(new ChatMessage("user", "Say hello and confirm you can respond."));
                     string reply = await TimedChatAsync(messages);
                     reply = TextSanitizer.CleanReply(reply, "AI", Math.Max(80, MaxReplyCharactersConfig.Value));
-                    _mainThreadActions.Enqueue(delegate { WriteChat("[DeepSims AI test] " + reply, "lightblue"); });
+                    EnqueueMainThread(delegate { WriteChat("[DeepSims AI test] " + reply, "lightblue"); });
                 }
                 catch (Exception ex)
                 {
                     string detail = ex.Message == null ? "unknown error" : ex.Message;
                     if (detail.Length > 180) detail = detail.Substring(0, 180) + "...";
-                    _mainThreadActions.Enqueue(delegate { WriteChat("[DeepSims] AI test failed: " + detail, "red"); });
+                    EnqueueMainThread(delegate { WriteChat("[DeepSims] AI test failed: " + detail, "red"); });
                 }
                 finally { _inferenceGate.Release(); }
             });
@@ -3925,7 +3983,7 @@ namespace ErenshorDeepSims
         {
             try
             {
-                string dir = Path.Combine(Paths.ConfigPath, "DeepSims");
+                string dir = DeepSimsPaths.DataRoot;
                 Directory.CreateDirectory(dir);
                 string path = Path.Combine(dir, "party-diagnostic.txt");
                 File.WriteAllText(path, PartyResolver.BuildDiagnosticReport());

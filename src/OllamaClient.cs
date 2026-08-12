@@ -1,4 +1,3 @@
-using BepInEx.Logging;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -31,11 +30,11 @@ namespace ErenshorDeepSims
 
     internal class OllamaClient
     {
-        private readonly ManualLogSource _log;
+        private readonly IDeepSimsLog _log;
         private readonly object _timingLock = new object();
         private OllamaTimingMetrics _lastTiming = new OllamaTimingMetrics();
 
-        internal OllamaClient(ManualLogSource log)
+        internal OllamaClient(IDeepSimsLog log)
         {
             _log = log;
         }
@@ -166,7 +165,7 @@ namespace ErenshorDeepSims
             string detail = "Ollama returned no final chat text";
             if (!string.IsNullOrWhiteSpace(attempt.DoneReason)) detail += " (done_reason=" + attempt.DoneReason + ")";
             if (!string.IsNullOrWhiteSpace(attempt.Thinking)) detail += "; thinking was returned but no final answer";
-            detail += ". Check BepInEx LogOutput.log for the raw Ollama response.";
+            detail += ". Check the Lunaris console/log for the raw Ollama response.";
             return detail;
         }
 

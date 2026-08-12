@@ -6,7 +6,7 @@ namespace ErenshorDeepSims
     // Deterministic coverage for the "party feels like real players hanging out" pacing pass:
     // variable ambient cadence (AmbientCadence), momentum decay, and short-lived callback memory
     // (ConversationMoment / ConversationMomentStore / ConversationCallbackPolicy). SocialDirector.cs
-    // itself cannot compile in this offline harness (BepInEx/Unity dependency), so these tests exercise
+    // itself cannot compile in this offline harness (framework/Unity dependency), so these tests exercise
     // the pure decision logic it delegates to, the same pattern ConversationTurnGuardTests.cs uses.
     internal static class ConversationPacingTests
     {
@@ -248,7 +248,7 @@ namespace ErenshorDeepSims
         }
 
         // Mirrors SocialDirector.BuildCallbackCandidate's scoring exactly (that method lives in the
-        // BepInEx-dependent SocialDirector.cs and cannot be called directly from this offline harness).
+        // framework-dependent SocialDirector.cs and cannot be called directly from this offline harness).
         private static AmbientSeedCandidate MirrorBuildCallbackCandidate(ConversationMoment moment, DateTime now)
         {
             return new AmbientSeedCandidate("callback_" + moment.TopicKey, "callback", "safe callback wording only",

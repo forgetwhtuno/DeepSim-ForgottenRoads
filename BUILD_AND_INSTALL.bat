@@ -1,14 +1,13 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-echo DeepSims - build and install
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0BUILD_AND_INSTALL.ps1" %*
+echo Deep Sims 0.7.1 - native Lunaris build and install
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0BUILD_AND_INSTALL.ps1" %*
 if errorlevel 1 (
   echo.
-  echo One or more mod builds failed. Copy the error text and send it back to me.
-  pause
-  exit /b 1
+  echo Build or install failed.
+  exit /b %errorlevel%
 )
 echo.
-echo DeepSims is built and installed.
-pause
+echo Build and install completed.
+endlocal

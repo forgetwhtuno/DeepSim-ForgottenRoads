@@ -6,7 +6,7 @@ using System.Net;
 namespace ErenshorDeepSims
 {
     // Deterministic, no-Ollama regression coverage for the fact/memory boundary. The same source is
-    // compiled by tests/RUN_DETERMINISTIC_TESTS.ps1 with small Unity/BepInEx stubs.
+    // compiled by tests/RUN_DETERMINISTIC_TESTS.ps1 with small Unity/framework stubs.
     internal static class DeterministicRegressionTests
     {
         private sealed class Clock

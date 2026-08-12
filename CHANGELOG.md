@@ -1,3 +1,14 @@
+## 0.7.1 development — native Lunaris migration
+
+- Migrated the Deep Sims plugin host from BepInEx `BaseUnityPlugin` to native `LunarisPlugin` metadata and permissions. Harmony remains intentionally retained for verified Erenshor hooks and the existing rich chat-command parser.
+- Replaced BepInEx `ConfigEntry<T>` dependencies with a Deep-Sims-owned value shim backed by Lunaris typed `Config.Register<T>()` settings, preserving the existing setting defaults and runtime access patterns.
+- Replaced BepInEx logging types with a small Deep-Sims-owned logging abstraction backed by Lunaris `ILog`.
+- Moved Deep Sims-owned memory/exports to `plugins/config/DeepSims`; a conservative one-time direct-install memory copy can import an old game-root `BepInEx/config/DeepSims/Memory` directory only when the new memory directory is empty, and never deletes the old files.
+- Strengthened `OnDestroy()` for Lunaris hot unload: request admission stops first, pending work and queued display closures are cleared, conversation generations are invalidated, telemetry/memory finish, Harmony patches are removed, and the plugin singleton is cleared without blocking on an in-flight Ollama call.
+- Reworked build/install/uninstall scripts around `<Erenshor>/plugins`, local Lunaris development references, and fail-safe temporary compilation; native BepInEx libraries are no longer compile/install requirements.
+- Preserved the newer MMO/Roleplay social-perspective work while adapting its config and runtime cleanup to the native Lunaris lifecycle. Roleplay remains orthogonal to Auto/LLM/Templates/Off and does not change gameplay authority or social admission frequency.
+- Kept optional Campmaster, Practice Duels, PvP, Nemesis, Follow/COOP compatibility surfaces absent-safe rather than forcing a one-sided Aura migration or relying on Lunaris load order.
+- This is a migration candidate until compiled against current local Erenshor/Lunaris assemblies and the in-game load/unload/reload matrix is completed.
 
 ## 0.7.x development - deterministic social foundation
 

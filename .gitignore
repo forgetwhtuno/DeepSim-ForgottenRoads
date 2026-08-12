@@ -12,3 +12,8 @@
 # Local reference assemblies and local Codex settings are not distributable source.
 /third_party/
 /.claude/
+
+# Local Lunaris developer libraries and release-prep scratch content, not distributable source.
+/LunarisLibs/
+/LunarisLibs.zip
+/erenshor-lunaris-release-prep.zip

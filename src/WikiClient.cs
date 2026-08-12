@@ -1,4 +1,3 @@
-using BepInEx.Logging;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -11,11 +10,11 @@ namespace ErenshorDeepSims
 {
     internal class WikiClient
     {
-        private readonly ManualLogSource _log;
+        private readonly IDeepSimsLog _log;
         private readonly object _cacheLock = new object();
         private readonly Dictionary<string, CachedWikiResult> _cache = new Dictionary<string, CachedWikiResult>(StringComparer.OrdinalIgnoreCase);
 
-        internal WikiClient(ManualLogSource log)
+        internal WikiClient(IDeepSimsLog log)
         {
             _log = log;
         }
@@ -168,7 +167,7 @@ namespace ErenshorDeepSims
             request.Method = "GET";
             request.Timeout = timeoutMs;
             request.ReadWriteTimeout = timeoutMs;
-            request.UserAgent = "ErenshorDeepSims/0.7.0 (+local BepInEx mod)";
+            request.UserAgent = "ErenshorDeepSims/0.7.1 (+local Lunaris mod)";
             request.Accept = "application/json";
             try
             {

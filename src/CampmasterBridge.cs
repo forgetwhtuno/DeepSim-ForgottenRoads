@@ -32,8 +32,30 @@ namespace ErenshorDeepSims
 
         static CampmasterBridge()
         {
-            try { AppDomain.CurrentDomain.AssemblyLoad += delegate { _resolved = false; }; }
+            try { AppDomain.CurrentDomain.AssemblyLoad += OnAssemblyLoad; }
             catch { }
+        }
+
+        private static void OnAssemblyLoad(object sender, AssemblyLoadEventArgs args)
+        {
+            _resolved = false;
+        }
+
+        // AppDomain events are process-wide and survive a Lunaris plugin GameObject. Remove the
+        // handler explicitly so a disabled Deep Sims assembly cannot be retained by the AppDomain.
+        internal static void Shutdown()
+        {
+            try { AppDomain.CurrentDomain.AssemblyLoad -= OnAssemblyLoad; }
+            catch { }
+            lock (ResolveLock)
+            {
+                _resolved = false;
+                _apiType = null;
+                _isActiveProperty = null;
+                _snapshotMethod = null;
+                _eventsMethod = null;
+                _lastSequence = 0;
+            }
         }
 
         internal static bool IsPresent

@@ -22,6 +22,7 @@ $webExtensions = Join-Path $framework "System.Web.Extensions.dll"
 if (-not (Test-Path $webExtensions)) { throw "System.Web.Extensions.dll was not found beside $csc" }
 
 $sourceFiles = @(
+    (Join-Path $repoRoot "src\DeepSimsLog.cs"),
     (Join-Path $repoRoot "src\Models.cs"),
     (Join-Path $repoRoot "src\RelationshipModel.cs"),
     (Join-Path $repoRoot "src\SocialFoundation.cs"),

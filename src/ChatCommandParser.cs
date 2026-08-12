@@ -120,6 +120,19 @@ namespace ErenshorDeepSims
             return true;
         }
 
+        internal static bool TryParseRoleplay(string raw, out string argument)
+        {
+            argument = null;
+            if (string.IsNullOrWhiteSpace(raw)) return false;
+            string t = raw.Trim();
+            const string prefix = "/dsroleplay";
+            if (!t.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return false;
+            if (t.Length == prefix.Length) { argument = string.Empty; return true; }
+            if (!char.IsWhiteSpace(t[prefix.Length])) return false;
+            argument = t.Substring(prefix.Length).Trim();
+            return true;
+        }
+
         internal static bool TryParseInferenceMode(string raw, out string argument)
         {
             argument = null;

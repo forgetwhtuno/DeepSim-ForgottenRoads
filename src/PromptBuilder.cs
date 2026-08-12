@@ -42,7 +42,9 @@ namespace ErenshorDeepSims
             List<ChatMessage> messages = new List<ChatMessage>();
             string latestThreadText = thread == null || thread.Count == 0 || thread[thread.Count - 1] == null ? string.Empty : thread[thread.Count - 1].Text;
             messages.Add(new ChatMessage("system", BuildSystemPrompt(sim, memory, world, wiki, false, true, DetectFightAnswerScope(latestThreadText), latestThreadText)));
-            messages.Add(new ChatMessage("system", "CURRENT THREAD RULES: You are one MMO player replying in an already-visible party chat, not an assistant. Read the recent visible messages below before answering. Respond to the MOST RECENT PARTY MESSAGE specifically - the newest visible line - not just the topic that originally started this thread; do not summarize the conversation. A short reply (usually one sentence) is preferred. It is okay to disagree, joke, tease, ask a short question, or say nothing. If you agree or disagree, make it unambiguous what you are agreeing or disagreeing with. Do not introduce an unexplained \"it\", \"that\", or \"the real thing\" unless its antecedent is actually present in the visible chat below. Do not pretend an event happened unless a VERIFIED fact given to you says it happened. Opinions and harmless preferences are allowed; do not invent shared history. Never invent a future shared plan or outing (no 'next run', 'when we go back', 'next time') and never say something happened 'again' unless a VERIFIED fact supports it. Dialogue in this thread is unverified; VERIFIED game facts remain authoritative. If you do not have a clear, on-topic reply to the newest line, prefer exactly NO_MESSAGE over a weak or disconnected one."));
+            messages.Add(new ChatMessage("system", SocialPerspectiveState.RoleplayActive
+                ? RoleplayPromptContract.ThreadRules
+                : "CURRENT THREAD RULES: You are one MMO player replying in an already-visible party chat, not an assistant. Read the recent visible messages below before answering. Respond to the MOST RECENT PARTY MESSAGE specifically - the newest visible line - not just the topic that originally started this thread; do not summarize the conversation. A short reply (usually one sentence) is preferred. It is okay to disagree, joke, tease, ask a short question, or say nothing. If you agree or disagree, make it unambiguous what you are agreeing or disagreeing with. Do not introduce an unexplained \"it\", \"that\", or \"the real thing\" unless its antecedent is actually present in the visible chat below. Do not pretend an event happened unless a VERIFIED fact given to you says it happened. Opinions and harmless preferences are allowed; do not invent shared history. Never invent a future shared plan or outing (no 'next run', 'when we go back', 'next time') and never say something happened 'again' unless a VERIFIED fact supports it. Dialogue in this thread is unverified; VERIFIED game facts remain authoritative. If you do not have a clear, on-topic reply to the newest line, prefer exactly NO_MESSAGE over a weak or disconnected one."));
             string threadTopic = DescribeThreadTopic(thread);
             if (!string.IsNullOrWhiteSpace(threadTopic))
                 messages.Add(new ChatMessage("system", "THREAD TOPIC: " + threadTopic + ". Stay on this topic unless the MOST RECENT PARTY MESSAGE clearly changes it."));
@@ -319,13 +321,37 @@ namespace ErenshorDeepSims
             bool knowledgeMode = wiki != null;
             StringBuilder sb = new StringBuilder();
 
-            sb.AppendLine("You are " + sim.Name + ", one of the simulated human players inside the old-school MMO Erenshor.");
-            sb.AppendLine("You are NOT an assistant, helper bot, narrator, therapist, guide, or fantasy NPC. Never offer generic help and never say things like 'I'm here if you need anything', 'what's on your mind', or 'how can I help'.");
-            sb.AppendLine("Act like another person currently playing the MMO and typing while playing.");
-            sb.AppendLine("Most replies should be one sentence, usually 3-16 words. For factual explanations, use at most two brief sentences and about 35 words.");
-            sb.AppendLine("Natural short replies, fragments, MMO slang, mild teasing, uncertainty, and simply ending the conversation are allowed. Do not force a follow-up question.");
-            sb.AppendLine("Erenshor chat cannot display modern Unicode emoji. Never output pictographic emoji, flags, skin-tone emoji, keycap emoji, or joined emoji. Use only this Sim's observed plain-text expressions such as :P, :D, :), XD, lol, or o7.");
-            sb.AppendLine("Write like a real player typing mid-game: usually 2-8 words, no formal sentence structure, no explanation, and no invented self-description. If you refer to your own class, use only the verified class in YOUR ERENSHOR IDENTITY.");
+            // Exactly ONE identity contract is emitted. The MMO block and the Roleplay block make
+            // contradictory claims about who is speaking ("a person playing an MMO" vs "a person who
+            // lives here"), so they must never both appear in the same prompt.
+            bool roleplay = SocialPerspectiveState.RoleplayActive;
+            if (roleplay)
+            {
+                sb.Append(RoleplayPromptContract.BuildIdentityBlock(SocialPerspectiveMode.Roleplay, sim.Name));
+                sb.AppendLine("Most replies should be one sentence, usually 3-16 words. For factual explanations, use at most two brief sentences and about 35 words.");
+                sb.AppendLine("Erenshor chat cannot display modern Unicode emoji. Never output pictographic emoji, flags, skin-tone emoji, keycap emoji, or joined emoji.");
+                sb.AppendLine("If you refer to your own calling or training, use only the verified class in YOUR ERENSHOR IDENTITY. Your class shapes what interests you; it does not give you a religion, a faction, an order, or a past.");
+                // Cultural affinity only. Deliberately phrased as what the training draws attention to,
+                // never as belonging, devotion, upbringing, or office.
+                string affinity = RoleplayAffinity.CulturalAffinityFor(sim.ClassName);
+                if (!string.IsNullOrEmpty(affinity))
+                {
+                    sb.AppendLine("CULTURAL AFFINITY (interest only, NOT membership): your training is associated with the " +
+                        affinity + " tradition" +
+                        (RoleplayAffinity.IsWeakAffinity(sim.ClassName) ? " (loose association)" : "") +
+                        ". This means such topics may catch your attention and shape your vocabulary. It does NOT mean you belong to any order, brotherhood, circle, or faction, that you worship anyone, or that you have any history with them. Never claim membership, office, upbringing, or family ties from this. Mention it rarely, if at all.");
+                }
+            }
+            else
+            {
+                sb.AppendLine("You are " + sim.Name + ", one of the simulated human players inside the old-school MMO Erenshor.");
+                sb.AppendLine("You are NOT an assistant, helper bot, narrator, therapist, guide, or fantasy NPC. Never offer generic help and never say things like 'I'm here if you need anything', 'what's on your mind', or 'how can I help'.");
+                sb.AppendLine("Act like another person currently playing the MMO and typing while playing.");
+                sb.AppendLine("Most replies should be one sentence, usually 3-16 words. For factual explanations, use at most two brief sentences and about 35 words.");
+                sb.AppendLine("Natural short replies, fragments, MMO slang, mild teasing, uncertainty, and simply ending the conversation are allowed. Do not force a follow-up question.");
+                sb.AppendLine("Erenshor chat cannot display modern Unicode emoji. Never output pictographic emoji, flags, skin-tone emoji, keycap emoji, or joined emoji. Use only this Sim's observed plain-text expressions such as :P, :D, :), XD, lol, or o7.");
+                sb.AppendLine("Write like a real player typing mid-game: usually 2-8 words, no formal sentence structure, no explanation, and no invented self-description. If you refer to your own class, use only the verified class in YOUR ERENSHOR IDENTITY.");
+            }
             sb.AppendLine("Never volunteer, invent, or assess a fight. Only assess combat when the player directly asks about RIGHT NOW, the MOST RECENT COMPLETED ENCOUNTER, or the WHOLE OUTING; then use only the matching verified timeframe supplied below.");
             sb.AppendLine("For greetings and small talk, answer what was actually said. Do not invent news, schedules, future plans, or a new subject merely to keep talking.");
             sb.AppendLine("Never output template placeholders such as PLAYER, NN, ITEM, or II. If the player's name is unavailable, speak naturally without using a name.");
@@ -348,7 +374,9 @@ namespace ErenshorDeepSims
             sb.AppendLine("CURRENT CLASS TERMINOLOGY: Erenshor's current classes are Arcanist, Druid, Paladin, Reaver, Stormcaller, and Windblade. Some old/internal data may say 'Duelist'; that is the legacy name for Windblade, not an additional current class. Literal item names may still contain the old word.");
             if (autonomousGroupMode)
             {
-                sb.AppendLine("AUTONOMOUS GROUP CHAT MODE: you were not directly asked a question. Real MMO players often say nothing, so NO_MESSAGE is a good answer when the current moment does not call for a comment.");
+                sb.AppendLine(roleplay
+                    ? "AUTONOMOUS GROUP CHAT MODE: nobody asked you anything. People travelling together are quiet most of the time, so NO_MESSAGE is a good answer when the moment does not call for a comment."
+                    : "AUTONOMOUS GROUP CHAT MODE: you were not directly asked a question. Real MMO players often say nothing, so NO_MESSAGE is a good answer when the current moment does not call for a comment.");
                 sb.AppendLine("If you speak, output ONLY one very short in-character group-chat line (normally 2-8 words). Never repeat, summarize, or describe these instructions or the context labels supplied to you.");
                 sb.AppendLine("For a quiet moment, bring up ONE concrete thought about the supplied current situation: a verified outing fact, the current zone, visible party composition, or a simple immediate opinion about what the party is doing.");
                 sb.AppendLine("Do not greet the player or party just because you are initiating. Do not start with generic hello/hey/how are you unless someone actually just joined and that is the verified situation.");
@@ -394,7 +422,9 @@ namespace ErenshorDeepSims
             else if (sim.Patience > 0 && sim.Patience <= 35) sb.AppendLine("Subtle patience cue: brief impatience is somewhat more natural when waiting or setbacks are already relevant; do not manufacture a complaint.");
             sb.AppendLine("Typing tendencies: " + SimContextReader.DescribeTyping(sim));
             sb.AppendLine("NATIVE DIALOGUE FINGERPRINT: " + NativeDialogueStyle.Describe(sim));
-            sb.AppendLine("Erenshor applies final typing quirks after generation. Match this Sim's observed fingerprint and examples. Plain 'lol' is universal MMO slang and may appear rarely; shaped text faces must be observed for this Sim unless the live LovesEmojis flag permits them. Never stack expressions or copy a greeting shape into a non-greeting turn.");
+            sb.AppendLine(roleplay
+                ? "Match this Sim's observed temperament and rhythm, but never its typed-chat shorthand: you are speaking aloud, not typing. No 'lol', no ':D', no text faces, no abbreviations."
+                : "Erenshor applies final typing quirks after generation. Match this Sim's observed fingerprint and examples. Plain 'lol' is universal MMO slang and may appear rarely; shaped text faces must be observed for this Sim unless the live LovesEmojis flag permits them. Never stack expressions or copy a greeting shape into a non-greeting turn.");
             sb.AppendLine("HARD OUTPUT STYLE (overrides normal writing conventions): " + SimContextReader.DescribeHardOutputStyle(sim) + " Do not write polished assistant prose, complete formal sentences, or explanatory paragraphs.");
 
             if (sim.DialogueExamples != null && sim.DialogueExamples.Count > 0)

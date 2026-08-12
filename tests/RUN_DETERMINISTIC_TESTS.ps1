@@ -34,6 +34,8 @@ $sourceFiles = @(
     (Join-Path $repoRoot "src\MemoryStore.cs"),
     (Join-Path $repoRoot "src\SessionTelemetry.cs"),
     (Join-Path $repoRoot "src\GroundingGuard.cs"),
+    (Join-Path $repoRoot "src\RoleplayPerspective.cs"),
+    (Join-Path $repoRoot "src\RoleplayDeterministicTests.cs"),
     (Join-Path $repoRoot "src\PromptBuilder.cs"),
     (Join-Path $repoRoot "src\ExternalNewsClient.cs"),
     (Join-Path $repoRoot "src\NetworkTimeoutHelper.cs"),

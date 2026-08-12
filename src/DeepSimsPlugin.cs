@@ -243,6 +243,7 @@ namespace ErenshorDeepSims
         internal ConfigEntry<bool> VanillaChatterContinuityConfig;
         internal ConfigEntry<float> VanillaChatterReplyChanceConfig;
         internal ConfigEntry<string> SocialExpressionModeConfig;
+        internal ConfigEntry<string> SocialPerspectiveConfig;
         internal ConfigEntry<string> SocialActivityPresetConfig;
         internal ConfigEntry<string> AdaptiveTownZonesConfig;
 
@@ -316,6 +317,10 @@ namespace ErenshorDeepSims
             VanillaChatterContinuityConfig = Config.Bind("Social Director", "VanillaChatterContinuity", true, "Let Deep Sims hear normal Erenshor party chatter and occasionally continue a substantive vanilla Sim line as part of the same conversation.");
             VanillaChatterReplyChanceConfig = Config.Bind("Social Director", "VanillaChatterReplyChance", 0.18f, "Base chance from 0 to 1 that a substantive vanilla Sim party-chat line gets a Deep Sim continuation. Greetings, acknowledgements, and combat command chatter are much less likely or ignored.");
             SocialExpressionModeConfig = Config.Bind("Social Director", "ExpressionMode", "Auto", "Autonomous social expression: Auto, LLM, Templates, or Off. Auto uses templates for ritual chatter and while Ollama is unavailable.");
+            // Orthogonal to ExpressionMode: this is WHO speaks, not HOW the line is produced.
+            // Default stays MMO so existing installs are unchanged until the player opts in.
+            SocialPerspectiveConfig = Config.Bind("Social Director", "Perspective", "MMO", "Social perspective: MMO or Roleplay. MMO keeps Sims talking like players in an old-school MMO. Roleplay makes them speak as the adventurers they represent. This does not change gameplay, grounding, or how often they talk.");
+            SocialPerspectiveState.Current = SocialPerspective.Parse(SocialPerspectiveConfig.Value);
             SocialActivityPresetConfig = Config.Bind("Social Director", "ActivityPreset", "Adaptive", "Autonomous social activity: Adaptive chooses a temporary Quiet/Normal/Lively party mood from personality and verified context; Quiet, Normal, and Lively are manual overrides.");
             AdaptiveTownZonesConfig = Config.Bind("Social Director", "AdaptiveTownZones", "Port Azure", "Comma-separated verified scene names that receive a social town boost in Adaptive activity mode.");
 
@@ -620,6 +625,14 @@ namespace ErenshorDeepSims
             {
                 ClearInput(typeText);
                 HandleSocialCommand(socialArgument);
+                return true;
+            }
+
+            string roleplayArgument;
+            if (ChatCommandParser.TryParseRoleplay(rawText, out roleplayArgument))
+            {
+                ClearInput(typeText);
+                HandleRoleplayCommand(roleplayArgument);
                 return true;
             }
 
@@ -1114,7 +1127,14 @@ namespace ErenshorDeepSims
                             SimSnapshot fresh = _slots.GetSnapshot(requestSim.Name);
                             // A departed/ineligible Sim must never deliver a stale private reply.
                             if (fresh == null || !_slots.IsDeepSim(requestSim.Name)) return;
-                            string shown = ApplyVanillaTypingConfig.Value ? SimContextReader.ApplyVanillaTypingStyle(fresh, rawReply) : rawReply;
+                            string shown = rawReply;
+                            if (ApplyVanillaTypingConfig.Value)
+                            {
+                                string styledPrivate = SimContextReader.ApplyVanillaTypingStyle(fresh, rawReply);
+                                shown = SocialPerspectiveState.RoleplayActive
+                                    ? RoleplayPromptContract.KeepSpokenStyle(styledPrivate, rawReply)
+                                    : styledPrivate;
+                            }
                             // PersonalizeString can itself operate on vanilla template text. Sanitize again afterwards so
                             // PLAYER/NN/ITEM/II can never leak to the visible Deep Sim response.
                             shown = TextSanitizer.CleanReply(shown, fresh.Name, world != null && world.Player != null ? world.Player.Name : null, Math.Max(80, MaxReplyCharactersConfig.Value));
@@ -1351,6 +1371,7 @@ namespace ErenshorDeepSims
                 string authorityReason;
                 bool authority = CanOwnAutonomousSocial(out authorityReason);
                 WriteChat("[DeepSims Social] mode=" + SocialPolicy.ParseMode(SocialExpressionModeConfig.Value) +
+                    " | perspective=" + SocialPerspective.Describe(SocialPerspectiveState.Current) +
                     " | activity=" + (_director == null ? SocialActivityPresetConfig.Value : _director.DescribeActivityPreset()) +
                     " | authority=" + (authority ? "yes" : "no (" + authorityReason + ")") +
                     " | " + DescribeSocialBudget(), "lightblue");
@@ -1375,6 +1396,39 @@ namespace ErenshorDeepSims
                 return;
             }
             WriteChat("[DeepSims Social] Usage: /dssocial [auto|llm|templates|off|adaptive|quiet|normal|lively|status]", "yellow");
+        }
+
+        // Perspective is intentionally its own small command rather than more /dssocial verbs: it is a
+        // different axis from expression mode, and overloading one command makes that easy to miss.
+        private void HandleRoleplayCommand(string argument)
+        {
+            string value = argument == null ? string.Empty : argument.Trim().ToLowerInvariant();
+            if (value.Length == 0 || value == "status")
+            {
+                WriteChat("[DeepSims Roleplay] perspective=" + SocialPerspective.Describe(SocialPerspectiveState.Current) +
+                    " | expression=" + SocialPolicy.ParseMode(SocialExpressionModeConfig.Value) +
+                    " (perspective changes how Sims speak, never how often)", "lightblue");
+                return;
+            }
+
+            bool enable;
+            if (value == "on" || value == "roleplay" || value == "rp") enable = true;
+            else if (value == "off" || value == "mmo") enable = false;
+            else
+            {
+                WriteChat("[DeepSims Roleplay] Usage: /dsroleplay [on|off|status]", "yellow");
+                return;
+            }
+
+            SocialPerspectiveMode mode = enable ? SocialPerspectiveMode.Roleplay : SocialPerspectiveMode.Mmo;
+            SocialPerspectiveState.Current = mode;
+            if (SocialPerspectiveConfig != null)
+            {
+                SocialPerspectiveConfig.Value = SocialPerspective.Describe(mode);
+                Config.Save();
+            }
+            WriteChat("[DeepSims Roleplay] Perspective set to " + SocialPerspective.Describe(mode) +
+                (enable ? ". Sims now speak as the adventurers they represent." : ". Sims speak as MMO players again."), "yellow");
         }
 
         internal SocialActivityPreset EffectiveSocialActivityPreset()
@@ -1499,7 +1553,14 @@ namespace ErenshorDeepSims
                 ? RelationshipModel.Describe(0f, 0f, 0f)
                 : _memory.GetRelationshipTone(speaker, null);
             string reply;
-            if (!SocialTemplates.TryRenderEvent(candidate, speaker, tone, out reply)) return false;
+            if (SocialPerspectiveState.RoleplayActive)
+            {
+                // Roleplay owns its own event vocabulary ("Well fought." not "grats"). If no RP line
+                // exists for this event type, stay silent rather than emitting MMO shorthand.
+                if (!RoleplayExpressionRouter.TryRenderEvent(candidate.Type, speaker,
+                    candidate.VerifiedContext == null ? 0 : candidate.VerifiedContext.GetHashCode(), out reply)) return false;
+            }
+            else if (!SocialTemplates.TryRenderEvent(candidate, speaker, tone, out reply)) return false;
             reply = TextSanitizer.CleanReply(reply, speaker.Name,
                 world != null && world.Player != null ? world.Player.Name : null,
                 Math.Max(80, MaxReplyCharactersConfig.Value));
@@ -1519,7 +1580,9 @@ namespace ErenshorDeepSims
                 // A selected memory/callback/player topic cannot safely degrade into an unrelated
                 // generic status line. If no exact fact-free template exists, silence preserves the
                 // seed contract and the topic remains unused for a later grounded opportunity.
-                if (!SocialTemplates.TryRenderAmbientSeed(evt.TopicKey, evt.VerifiedFact, evt.OpportunityId,
+                // Perspective picks the template backend. In Roleplay this never falls through to the
+                // MMO pool, so an in-world subject cannot be answered with reroll/grinding/lol.
+                if (!RoleplayExpressionRouter.TryRenderAmbientSeed(evt.TopicKey, evt.VerifiedFact, evt.OpportunityId,
                     speaker, out seededReply)) return false;
                 seededReply = TextSanitizer.CleanReply(seededReply, speaker.Name,
                     world != null && world.Player != null ? world.Player.Name : null,
@@ -1859,9 +1922,53 @@ namespace ErenshorDeepSims
                 "\". It is real-world context, not Erenshor lore or personal history; mention it only if it fits your personality, and do not invent details.";
         }
 
+        // Final autonomous Roleplay output boundary for GENERATED lines. MMO perspective is returned
+        // untouched. A Roleplay line that leaks the out-of-world frame gets exactly one deterministic
+        // template salvage on the same selected subject; otherwise it becomes NO_MESSAGE. The LLM is
+        // never re-asked, and SocialBudget is not consulted or altered here.
+        private string ApplyRoleplayAutonomousGuard(string line, string topicKey, long opportunityId, SimSnapshot speaker)
+        {
+            if (string.IsNullOrWhiteSpace(line) || IsNoMessage(line)) return line;
+            return RoleplayExpressionRouter.GuardGeneratedAutonomousLine(line, topicKey, opportunityId,
+                speaker, SocialPerspectiveState.RoleplayActive);
+        }
+
+        private DateTime _nextRoleplayContextRefreshUtc = DateTime.MinValue;
+
+        // Bounded runtime caller for RoleplayKnowledgeReader. Only runs in Roleplay perspective, at
+        // most once a minute, and keeps exactly one faction. Reads live Erenshor state only; it never
+        // writes to the game, never persists, and generated dialogue has no path into it.
+        private void RefreshRoleplayFactionContext()
+        {
+            if (!SocialPerspectiveState.RoleplayActive) { RoleplayFactionContext.Clear(); RoleplayClassContext.Clear(); return; }
+            DateTime now = DateTime.UtcNow;
+            if (now < _nextRoleplayContextRefreshUtc) return;
+            _nextRoleplayContextRefreshUtc = now.AddSeconds(60);
+
+            // Offer the class-interest subject only when somebody present could speak it.
+            bool anyAffinity = false;
+            List<SimSnapshot> activeSims = _slots == null ? null : _slots.GetActiveSnapshots();
+            if (activeSims != null)
+                for (int i = 0; i < activeSims.Count && !anyAffinity; i++)
+                    if (activeSims[i] != null && RoleplayAffinity.HasCulturalAffinity(activeSims[i].ClassName)) anyAffinity = true;
+            RoleplayClassContext.Set(anyAffinity);
+
+            try
+            {
+                List<RoleplayFact> exposed = RoleplayKnowledgeReader.EncounteredFactions();
+                if (exposed == null || exposed.Count == 0) { RoleplayFactionContext.Clear(); return; }
+                // Deterministic pick so the subject does not flicker between refreshes.
+                RoleplayFact chosen = exposed[0];
+                RoleplayFactionContext.Set(chosen.Label,
+                    RoleplayKnowledgeReader.AttitudeFor(chosen));
+            }
+            catch { RoleplayFactionContext.Clear(); }
+        }
+
         private WorldSnapshot BuildAwareWorld()
         {
             List<SimSnapshot> active = _slots == null ? new List<SimSnapshot>() : _slots.GetActiveSnapshots();
+            RefreshRoleplayFactionContext();
             return BuildAwareWorld(active);
         }
 
@@ -2443,6 +2550,7 @@ namespace ErenshorDeepSims
                     reply = await TimedChatAsync(messages);
                     reply = TextSanitizer.CleanReply(reply, next.Name, world != null && world.Player != null ? world.Player.Name : null, Math.Max(80, MaxReplyCharactersConfig.Value));
                     reply = await GroundPartyLineAsync(reply, messages, next, memory, world, candidate.VerifiedContext, null, false, string.Empty).ConfigureAwait(false);
+                    reply = ApplyRoleplayAutonomousGuard(reply, candidate == null ? null : candidate.Type, 0, next);
                 }
                 finally { _inferenceGate.Release(); }
                 if (IsNoMessage(reply)) { stopReason = "NO_MESSAGE/grounding"; break; }
@@ -2554,6 +2662,10 @@ namespace ErenshorDeepSims
                         Math.Max(80, MaxReplyCharactersConfig.Value));
                     first = await GroundPartyLineAsync(first, messages, speaker, speakerMemory, world,
                         situation, null, forceMessage, situation, intent).ConfigureAwait(false);
+                    // Roleplay voice guard runs after grounding so it sees the line that would actually
+                    // be spoken. MMO perspective passes straight through.
+                    first = ApplyRoleplayAutonomousGuard(first, evt == null ? null : evt.TopicKey,
+                        evt == null ? 0 : evt.OpportunityId, speaker);
                     if (IsNoMessage(first))
                     {
                         if (forceMessage)
@@ -3283,7 +3395,17 @@ namespace ErenshorDeepSims
                         Logger.LogDebug("Suppressed queued group reply because the speaker left or became ineligible: " + line.Speaker);
                         continue;
                     }
-                    if (fresh != null && ApplyVanillaTypingConfig.Value) shown = SimContextReader.ApplyVanillaTypingStyle(fresh, shown);
+                    if (fresh != null && ApplyVanillaTypingConfig.Value)
+                    {
+                        // Native personalization runs AFTER the Roleplay guard accepted this line, and
+                        // PersonalizeString owns the game's emoticon/slang logic. In Roleplay keep the
+                        // harmless traits but refuse newly injected typed-chat texture.
+                        string accepted = shown;
+                        string styled = SimContextReader.ApplyVanillaTypingStyle(fresh, accepted);
+                        shown = SocialPerspectiveState.RoleplayActive
+                            ? RoleplayPromptContract.KeepSpokenStyle(styled, accepted)
+                            : styled;
+                    }
                     string playerName = SimContextReader.GetPlayerName();
                     shown = TextSanitizer.CleanReply(shown, line.Speaker, playerName, Math.Max(80, MaxReplyCharactersConfig.Value));
                 }

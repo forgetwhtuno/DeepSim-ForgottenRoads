@@ -180,6 +180,50 @@ namespace ErenshorDeepSims
                 "react to the quiet moment with a short joke or teasing line", 28.0)
         };
 
+        // Roleplay subject catalog. Deliberately a parallel table rather than a rewrite of Downtime:
+        // an in-world adventurer has no opinion about rerolling, grinding, or gear stats, and the MMO
+        // table must stay byte-identical for MMO perspective. Base scores mirror the MMO band so
+        // perspective changes WHAT is chosen without changing how often a subject beats silence.
+        // Faction subjects are NOT in this table; they are appended only when verified faction
+        // exposure exists (see AmbientSeedSelector.BuildDowntimeCandidates).
+        internal static readonly AmbientSeedDefinition[] RoleplayDowntime = new AmbientSeedDefinition[]
+        {
+            new AmbientSeedDefinition("rp_place", "world",
+                "say something short about how this place feels, using only what is visibly here", 34.0),
+            new AmbientSeedDefinition("rp_curiosity", "world",
+                "wonder aloud about this place or ask a companion what they know; invent no answer", 32.0),
+            new AmbientSeedDefinition("rp_danger", "state",
+                "give one short cautious observation about what may lie ahead", 28.0),
+            new AmbientSeedDefinition("rp_adventure", "planning",
+                "express appetite for going further or turning back, as a preference only", 30.0),
+            new AmbientSeedDefinition("rp_downtime", "smalltalk",
+                "react briefly to the quiet, in-world, without inventing an event", 24.0),
+            new AmbientSeedDefinition("rp_tease", "social",
+                "lightly tease a companion about the present moment", 28.0),
+            new AmbientSeedDefinition("rp_companions", "social",
+                "say one short thing to a visible companion about right now", 34.0),
+            new AmbientSeedDefinition("rp_belief", "preference",
+                "offer a short personal opinion or doubt without asserting any fact", 30.0)
+        };
+
+        // Offered only when the speaker's class carries a verified cultural affinity. Weighted at the
+        // low end of the RP band so a character's tradition occasionally colours conversation instead
+        // of dominating it, and it flows through the same fatigue/duplicate/silence machinery as every
+        // other subject -- no timer, no class cooldown, no guaranteed class talk.
+        internal static readonly AmbientSeedDefinition RoleplayClassInterest = new AmbientSeedDefinition(
+            "rp_class_interest", "world",
+            "say one short thing that reflects what your training makes you notice here; claim no order, faith, or past", 22.0);
+
+        // Only usable when verified faction exposure is supplied; never selected merely because
+        // factions exist in the world.
+        internal static readonly AmbientSeedDefinition RoleplayFactionOpinion = new AmbientSeedDefinition(
+            "rp_faction_opinion", "world",
+            "give one short attitude toward a faction the party has actually dealt with; assert no history, motive, or membership", 30.0);
+
+        internal static readonly AmbientSeedDefinition RoleplayFactionUncertainty = new AmbientSeedDefinition(
+            "rp_faction_uncertainty", "world",
+            "admit you do not know enough about a faction the party has encountered; invent nothing", 26.0);
+
         // The party standing around is expected context, not a subject.  This exists so the idea has
         // one canonical key that fatigue and diagnostics can talk about, and it is scored so low that
         // it normally loses to silence.
@@ -1000,8 +1044,25 @@ namespace ErenshorDeepSims
             string verifiedSessionFact, string sessionFactSource, DateTime now)
         {
             List<AmbientSeedCandidate> candidates = new List<AmbientSeedCandidate>();
-            for (int i = 0; i < AmbientTopics.Downtime.Length; i++)
-                candidates.Add(new AmbientSeedCandidate(AmbientTopics.Downtime[i], now));
+            // Perspective selects WHICH subject table is offered. It does not add candidates, change
+            // scores, or touch the silence threshold, so opportunity frequency is unaffected.
+            AmbientSeedDefinition[] table = SocialPerspectiveState.RoleplayActive
+                ? AmbientTopics.RoleplayDowntime
+                : AmbientTopics.Downtime;
+            for (int i = 0; i < table.Length; i++)
+                candidates.Add(new AmbientSeedCandidate(table[i], now));
+
+            // Faction subjects require verified exposure supplied by the caller. Without it they are
+            // simply absent, so a faction is never discussed merely because it exists in the world.
+            if (SocialPerspectiveState.RoleplayActive && RoleplayFactionContext.HasExposedFaction)
+            {
+                candidates.Add(new AmbientSeedCandidate(AmbientTopics.RoleplayFactionOpinion, now));
+                candidates.Add(new AmbientSeedCandidate(AmbientTopics.RoleplayFactionUncertainty, now));
+            }
+
+            // Class cultural interest is one ordinary low-weight candidate among the RP subjects.
+            if (SocialPerspectiveState.RoleplayActive && RoleplayClassContext.AnyAffinityPresent)
+                candidates.Add(new AmbientSeedCandidate(AmbientTopics.RoleplayClassInterest, now));
 
             // Camp already means the party has stopped.  Saying so is not a subject there.
             if (mode != SocialContextMode.Camp)

@@ -64,14 +64,14 @@ namespace ErenshorDeepSims
                                 exactResult.SourceLabel = "Erenshor community wiki";
                                 exactResult.Found = true;
                                 Cache(cacheKey, exactResult);
-                                if (_log != null) _log.LogDebug("Wiki exact-title lookup '" + cleanQuery + "' -> " + exactResult.Title + ": " + TrimForLog(exactResult.Extract, 600));
+                                if (_log != null) _log.LogDebug("Wiki exact-title lookup matched; titleChars=" + (exactResult.Title == null ? 0 : exactResult.Title.Length) + " extractChars=" + (exactResult.Extract == null ? 0 : exactResult.Extract.Length));
                                 return Clone(exactResult);
                             }
                         }
                     }
                     catch (Exception exactEx)
                     {
-                        if (_log != null) _log.LogDebug("Wiki exact-title candidate '" + exactCandidates[e] + "' did not resolve: " + exactEx.Message);
+                        if (_log != null) _log.LogDebug("Wiki exact-title candidate did not resolve: " + exactEx.GetType().Name);
                     }
                 }
 
@@ -87,7 +87,7 @@ namespace ErenshorDeepSims
                 {
                     WikiResult miss = NotFound(cleanQuery);
                     Cache(cacheKey, miss);
-                    if (_log != null) _log.LogDebug("Wiki lookup '" + cleanQuery + "' -> no pages");
+                    if (_log != null) _log.LogDebug("Wiki lookup returned no pages; queryChars=" + cleanQuery.Length);
                     return miss;
                 }
 
@@ -107,7 +107,7 @@ namespace ErenshorDeepSims
                         }
                         catch (Exception parseEx)
                         {
-                            if (_log != null) _log.LogWarning("Wiki parse fallback failed for '" + page.Title + "': " + parseEx.Message);
+                            if (_log != null) _log.LogWarning("Wiki parse fallback failed for '" + page.Title + "': " + DiagnosticPrivacy.ExceptionType(parseEx));
                         }
                     }
 
@@ -128,7 +128,7 @@ namespace ErenshorDeepSims
                 {
                     WikiResult miss = NotFound(cleanQuery);
                     Cache(cacheKey, miss);
-                    if (_log != null) _log.LogDebug("Wiki lookup '" + cleanQuery + "' -> search results lacked useful query relevance");
+                    if (_log != null) _log.LogDebug("Wiki lookup results lacked useful relevance; queryChars=" + cleanQuery.Length);
                     return miss;
                 }
 
@@ -155,7 +155,7 @@ namespace ErenshorDeepSims
                 result.SourceLabel = "Erenshor community wiki";
                 result.Found = !string.IsNullOrWhiteSpace(groundedText);
                 Cache(cacheKey, result);
-                if (_log != null) _log.LogDebug("Wiki lookup '" + cleanQuery + "' -> " + result.Title + ": " + TrimForLog(result.Extract, 600));
+                if (_log != null) _log.LogDebug("Wiki lookup matched " + ranked.Count + " page(s); queryChars=" + cleanQuery.Length + " extractChars=" + (result.Extract == null ? 0 : result.Extract.Length));
                 return Clone(result);
             });
         }
@@ -188,12 +188,12 @@ namespace ErenshorDeepSims
                     }
                     catch { }
                 }
-                if (_log != null) _log.LogWarning("Erenshor wiki request failed: " + TrimForLog(detail, 500));
+                if (_log != null) _log.LogWarning("Erenshor wiki request failed: " + ex.Status);
                 throw new InvalidOperationException("Erenshor wiki lookup failed: " + detail, ex);
             }
             catch (TimeoutException ex)
             {
-                if (_log != null) _log.LogWarning("Erenshor wiki request timed out: " + TrimForLog(ex.Message, 300));
+                if (_log != null) _log.LogWarning("Erenshor wiki request timed out: " + DiagnosticPrivacy.ExceptionType(ex));
                 throw new InvalidOperationException("Erenshor wiki lookup timed out: " + ex.Message, ex);
             }
         }

@@ -617,7 +617,7 @@ namespace ErenshorDeepSims
                             bool matches = string.Equals(verifiedClass, askedClass, StringComparison.OrdinalIgnoreCase);
                             sb.AppendLine("VERIFIED IDENTITY VS ASKED CLASS: your own verified native class is " + Safe(verifiedClass) + ". " +
                                 (matches
-                                    ? "That IS " + askedClass + " -- you may answer as yourself about being one, grounded in your own verified class and experience, not by reciting the reference text's general lore."
+                                    ? "That IS " + askedClass + " -- you may answer as yourself about being one, grounded in your verified class and a present-tense preference. Do not invent training history or past experience, and do not recite the reference text's general lore."
                                     : "That is NOT " + askedClass + " -- if asked whether you are a " + askedClass + " or what it is like to be one, correct that premise naturally as yourself. Do not claim to be a " + askedClass + " and do not claim total ignorance of your own class."));
                         }
                     }
@@ -680,7 +680,7 @@ namespace ErenshorDeepSims
                 if (string.Equals(message.role, "user", StringComparison.OrdinalIgnoreCase))
                 {
                     PartyReplyIntent intent = PartyReplyIntentClassifier.Classify(text);
-                    if (intent == PartyReplyIntent.FactualGameQuestion || intent == PartyReplyIntent.VerifiedHistoryQuestion)
+                    if (intent == PartyReplyIntent.FactualGameQuestion || intent == PartyReplyIntent.IdentityFact || intent == PartyReplyIntent.VerifiedHistoryQuestion)
                         return true;
                     if (Regex.IsMatch(text, @"\b(?:last fight|last encounter|this fight|current fight|whole outing|this session)\b", RegexOptions.IgnoreCase))
                         return true;

@@ -34,6 +34,8 @@ namespace ErenshorDeepSims
         private const int MaxPendingWrites = 32;
         private const int NormalFlushBatch = 16;
 
+        internal bool WriterAlive { get { return _writerThread != null && _writerThread.IsAlive && !_writerStopping; } }
+
         internal MemoryStore(string directory, IDeepSimsLog log, Func<SimMemory, bool> writeAttemptGate = null)
         {
             _directory = directory;
@@ -657,7 +659,7 @@ namespace ErenshorDeepSims
             }
             catch (Exception ex)
             {
-                if (_log != null) _log.LogWarning("Could not read DeepSims memory for " + simKey + ": " + ex.Message);
+                if (_log != null) _log.LogWarning("Could not read DeepSims memory for " + simKey + ": " + ex.GetType().Name);
                 return null;
             }
         }
@@ -859,7 +861,7 @@ namespace ErenshorDeepSims
             catch (Exception ex)
             {
                 try { if (File.Exists(temp)) File.Delete(temp); } catch { }
-                if (_log != null) _log.LogWarning("Could not save DeepSims memory for " + memory.Name + ": " + ex.Message);
+                if (_log != null) _log.LogWarning("Could not save DeepSims memory for " + memory.Name + ": " + ex.GetType().Name);
                 return false;
             }
         }

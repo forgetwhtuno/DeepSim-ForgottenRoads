@@ -10,14 +10,29 @@ namespace ErenshorDeepSims
         internal static string ConfigRoot { get { return Path.Combine(AppContext.BaseDirectory, "plugins", "config"); } }
         internal static string DataRoot { get { return Path.Combine(ConfigRoot, "DeepSims"); } }
         internal static string MemoryDirectory { get { return Path.Combine(DataRoot, "Memory"); } }
+        internal static string CharacterMemoryRoot { get { return Path.Combine(MemoryDirectory, "Characters"); } }
+        internal static string CharacterMemoryDirectory(string characterKey)
+        {
+            string key = string.IsNullOrWhiteSpace(characterKey) ? CharacterScopeKey.Unscoped : CharacterScopeKey.SafeKey(characterKey);
+            // CharacterScopeKey.Compose already produces a filesystem-safe key; SafeKey is repeated
+            // here as defense in depth for any future external caller.
+            return Path.Combine(CharacterMemoryRoot, key);
+        }
         internal static string ExportDirectory { get { return Path.Combine(DataRoot, "Exports"); } }
         internal static string DiagnosticFile(string name) { return Path.Combine(DataRoot, name); }
+
+        internal static bool HasLegacyGlobalMemory()
+        {
+            try { return Directory.GetFiles(MemoryDirectory, "*.json", SearchOption.TopDirectoryOnly).Length > 0; }
+            catch { return false; }
+        }
 
         internal static void EnsureDataDirectories(IDeepSimsLog log)
         {
             Directory.CreateDirectory(ConfigRoot);
             Directory.CreateDirectory(DataRoot);
             Directory.CreateDirectory(MemoryDirectory);
+            Directory.CreateDirectory(CharacterMemoryRoot);
             Directory.CreateDirectory(ExportDirectory);
             TryImportDirectBepInExMemory(log);
         }
@@ -34,11 +49,11 @@ namespace ErenshorDeepSims
                 string oldRoot = Path.Combine(AppContext.BaseDirectory, "BepInEx", "config", "DeepSims", "Memory");
                 if (!Directory.Exists(oldRoot)) return;
                 CopyMissingTree(oldRoot, MemoryDirectory);
-                if (log != null) log.LogInfo("Imported existing direct-install Deep Sims memory into the Lunaris data directory. The old files were left untouched.");
+                if (log != null) log.LogInfo("Preserved existing direct-install Deep Sims memory as unscoped legacy data. It is not assigned to a character automatically; the old files were left untouched.");
             }
             catch (Exception ex)
             {
-                if (log != null) log.LogWarning("Could not import old direct-install Deep Sims memory: " + ex.Message);
+                if (log != null) log.LogWarning("Could not import old direct-install Deep Sims memory: " + ex.GetType().Name);
             }
         }
 

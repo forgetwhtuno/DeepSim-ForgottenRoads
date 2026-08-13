@@ -1,200 +1,191 @@
 # Current Work — Deep Sims
 
-This file is meant to be handed to another AI (or a human) for a deeper audit. It records what is
-actually confirmed versus what is only build/test-verified. Do not upgrade anything here to
-"confirmed working" without a real live-game observation backing it.
+## 2026-08-13 three-audit integration pass — SOURCE VERIFIED + TEST WIRED, INSTALLED FOR LIVE TEST
 
-## Current branch / SHA
+`DeepSims.patch` from `DeepSims-Full-Deep-Audit` applied against base `b21b4d4150e0b...` (current
+HEAD matched exactly). `DeepSimsControlApi` normalized (`ApiVersion=1`, `ModuleId="deepsims"`,
+`HasDedicatedPanel=false`, `IsPanelOpen=false`); new `DeepSimsSuiteAuraProvider` added exposing
+`socialMode`/`activity`/`roleplay` settings and a `refreshStatus` action, status-only (no raw
+memory/prompts/keys ever surfaced).
 
-- Branch: `agent/lunaris-native-deepsims`
-- HEAD: `f75a54aba91400484315bb0d464b61830fe51415` — "Roleplay: central output guard,
-  subjective-question routing, verified-identity cross reference"
-- Open PR: [#2](https://github.com/forgetwhtuno/DeepSim-erenshor/pull/2) against `main`, **draft,
-  unmerged**. Do not merge without an explicit instruction to do so in the moment.
-- Parent commit `bc41870` — "Migrate Deep Sims to a native Lunaris plugin" (the BepInEx-to-Lunaris
-  migration itself).
+Two real bugs found and fixed while reconciling, not just ported: `RoleplayPerspective.cs` had a
+`Regex.Escape(phrase).Replace(" ", @"\s+")` ordering bug — `Regex.Escape` escapes the space itself,
+so the pattern could never match, silently disabling every multi-word reject phrase ("this game",
+"on steam", "on discord", etc.) in the final output Roleplay guard. `SocialFoundation.cs`'s
+`IdentityFact` regex matched the article "a" as its subject placeholder, misrouting "what is a
+windblade?" as an identity question instead of `FactualGameQuestion`. Both fixed.
 
-## Current live state
+Legacy flat/global memory is preserved untouched on disk; new writes go to
+`Memory/Characters/<key>/`; `HasLegacyGlobalMemory()` + an `Awake()` warning surface the migration
+notice; a conservative one-time import only fires into the still-empty legacy-flat location and
+never deletes/overwrites. Pending-HTTP-unload traced end-to-end through `EnqueueMainThread`'s
+`_requestStopping` gate and `QueueGroupMessage`'s own check — **finding: INERT**, a late-finishing
+background call cannot reach chat/UI/memory after unload. No `Abort()` plumbing was added, per
+instruction.
 
-Confirmed working by direct observation of a real Lunaris session log this session:
+Build: PASS against real installed assemblies, zero BepInEx references. Tests:
+`RUN_DETERMINISTIC_TESTS.ps1` — **721/721 PASS**. Installed to the live game's `plugins\` folder
+with the game closed. Nothing committed/pushed.
 
-- Native Lunaris load succeeds; the plugin's own "loaded" message appears (see the suite-wide
-  duplicate-Awake question below — this message appeared *twice* per bootstrap, like every other
-  native-Lunaris mod in the suite, not something specific to Deep Sims).
-- Ollama connectivity works — real chat requests are sent and real replies come back
-  (`qwen3.5:2b`/`qwen3.5:4b` observed in the log).
-- Normal whole-party group conversation works: multiple Sims (Dancer, Phanty, Cyndara observed)
-  produced generated lines, grounding rejected at least one ungrounded line correctly
-  ("Rejected ungrounded group line from Phanty: unsupported loot/acquisition assertion"), and a
-  retry-on-reject flow was observed working (a rejected first draft triggered a second Ollama
-  call that then passed grounding).
-- PvP integration: PvP's own encounter/combat had a good live result in the same session (see
-  `Erenshor-Mod-Suite/docs/CURRENT_WORK.md`'s PvP entry) — Deep Sims' PvP-adjacent optional
-  integration status specifically has not been isolated/confirmed beyond "nothing visibly broke."
-- Follow integration status: not isolated/confirmed this session either way.
+**NEEDS LIVE TEST**: duplicate-instance coexistence, character A/B memory-scope switch in-game, and
+the 3–5x Ollama pending-request unload/re-enable stress test — all require the running game and
+were not simulated.
 
-Not yet observed this session (absence of evidence, not evidence of absence):
-- A clean unload/reload cycle.
-- Multi-character (character-switch) behavior for anything Deep-Sims-owned.
-- Sustained-session performance beyond the frame-hitch lines noted below.
+**Audit snapshot:** 2026-08-13
 
-## Current Roleplay investigation
+This file records the state after the full Deep Sims source audit. Evidence labels are deliberate:
 
-This is the part most likely to need a deeper audit. Recorded here exactly, including the false
-starts, so a reviewer can see the actual reasoning trail rather than just the final claim.
+- **LIVE VERIFIED** — observed in the supplied 2026-08-13 Lunaris log.
+- **SOURCE VERIFIED** — proved by tracing the current source.
+- **TEST WIRED** — deterministic regression exists and is called by the standalone runner.
+- **NEEDS LOCAL VERIFICATION** — this audit environment lacked the Windows C# compiler/runtime references needed to execute it.
+- **NEEDS LIVE TEST** — requires Erenshor + Lunaris in game.
 
-### Round 1 — `/dsroleplay on` appeared to do nothing
+Do not upgrade SOURCE/TEST evidence to LIVE VERIFIED without a new live run.
 
-Live symptom: turning Roleplay on did not visibly change dialogue. Example observed line:
-`"Dancer tells the group: i don't know that one heh"` after being asked about being a Windblade.
+## Base branch / SHA
 
-Investigation ruled out, with reasoning, before finding the real cause:
-- **State round-trip**: `SocialPerspective.Parse`/`Describe` correctly round-trip `"Roleplay"` to
-  the enum and back — verified by direct code read, not the bug.
-- **Config sync**: `SyncSocialPerspectiveFromConfig()` reads the same in-memory
-  `_settings.SocialPerspective` field the `/dsroleplay` command handler just wrote — not a
-  disk-reread race, not the bug.
-- **Main prompt path**: `PromptBuilder.BuildSystemPrompt` does branch correctly on
-  `SocialPerspectiveState.RoleplayActive` and builds an entirely different identity block via
-  `RoleplayPromptContract.BuildIdentityBlock` when active. This was confirmed **directly against a
-  real Ollama request body captured in the live log** — the actual system prompt sent to the model
-  said (verbatim, from the log): *"You are Phanty, the adventurer this Erenshor character is...
-  Erenshor is your world, not a game... You are not a player controlling a character."* This part
-  of the system was never broken.
+- Branch audited: `agent/lunaris-native-deepsims`
+- Exact audit base: `b21b4d4150e0baffcc2d48ec6b44d6489e057d86`
+- `main` observed at audit start: `232a6e03a7b7d9bee7a7f36b7d03b7312f202351`
+- The previous version of this document incorrectly listed `f75a54aba91400484315bb0d464b61830fe51415` as current HEAD. `b21b4d4` is the current draft-branch tip; its additional commit is documentation/audit-handoff work on top of `f75a54a`.
 
-Actual root cause found: `GroundPartyLineAsync`'s post-generation grounding-rejection fallback
-called `SocialTemplates.RenderUnknownFactReply` — a hardcoded MMO-flavored filler template with
-zero perspective awareness — whenever an LLM reply failed grounding. This fires routinely on
-subjective questions (grounding has nothing to check an opinion against), so a live player asking
-almost any opinion question would silently get the MMO-perspective fallback regardless of the
-Roleplay-aware prompt that had just been sent. Fixed by adding `RoleplayFallback` (in
-`src/RoleplayPerspective.cs`) and routing every fallback call site in `src/DeepSimsPlugin.cs`
-through perspective-aware dispatch wrappers. Also found and fixed in the same pass: the existing
-`RoleplayDeterministicTests` file existed but was never wired into any runnable command — now
-runs via `/dsguardtest`.
+No commit, push, merge, reset, clean, or other Git write was performed by this audit.
 
-**This round was build/test-verified only; not live-retested before Round 2's evidence arrived.**
+## Live evidence carried into this audit
 
-### Round 2 — guard wasn't actually protecting output
+### Roleplay failure history — LIVE VERIFIED, pre-current-fix DLL
 
-A further live pass (after Round 1's fix was installed) produced a diagnostic log line per
-generated message: `perspective=Roleplay|MMO expression=LLM|Template source=... 
-roleplayPromptApplied=True|False roleplayGuardApplied=True|False`. Live evidence:
+The supplied live log proves the perspective/config/prompt route was already working while final output enforcement was not:
 
-```
-perspective=Roleplay roleplayPromptApplied=True roleplayGuardApplied=False
-```
+- the model system prompt says the Sim is the in-world adventurer;
+- diagnostics report `perspective=Roleplay` and `roleplayPromptApplied=True`;
+- the same run reports `roleplayGuardApplied=False` on bad visible output;
+- visible examples include `online again`, `playing NES`, `lmao`, `heh`, and `:D`.
 
-repeated on several ACCEPTED, player-visible lines that clearly contained MMO/internet-chat
-texture Roleplay is supposed to prevent:
+Therefore the historical failure was not simply `/dsroleplay` failing to set state. It was a final-output/pipeline enforcement problem. The current guard work described below has **not** been live-tested in this audit.
 
-- `"nice to see you online again"`
-- `"are your eyes painted on or playing NES? lmao"`
-- `"heh yooo Brinon! aloha"`
-- `"lmao maybe we're just too quiet to hear our own footsteps? :D"`
-- `"Hey pal, nice to see you online again! Hit me up if you wanna hang."`
-- `"It's quiet in Hidden... heh :D just peace for now lol"`
+### Dancer / Windblade failure — LIVE VERIFIED + SOURCE VERIFIED
 
-Root cause: `roleplayGuardApplied=False` wasn't ambiguous logging noise, it was accurate — no
-roleplay-specific content guard ran *at all* on the group-reply, whisper,
-vanilla-Sim-continuation, verified-event, or conversation-continuation paths. Only the narrow
-ambient/autonomous path (`ApplyRoleplayAutonomousGuard`) ran any check, and even that guard's
-vocabulary never covered plain chat texture like "lol"/"heh"/":D"/"online" — it was built to catch
-stage-direction/self-narration, a different problem.
+The live log's PvP roster identifies `Dancer L12 Duelist/Striker`. Current Deep Sims normalizes native/internal `Duelist` to the current player-facing class `Windblade`. The same log shows Deep Sims answering the subjective Windblade question incorrectly as Druid, rejecting that line, retrying with identity uncertainty, then falling back to ignorance.
 
-Fix: one central `RoleplayOutputGuard.Enforce(candidate, speakerName, out changed, out rejected)`
-in `src/RoleplayPerspective.cs`. Two tiers: texture (the existing `ChatTexture` regex, extended)
-is stripped in place so the sentence survives; core out-of-world vocabulary (`game`, `server`,
-`session`, `online`, `dps`, `hit me up`, etc. — see `RoleplayOutputGuard.RejectCoreWords`/
-`RejectCorePhrases`, kept as data so the list is easy to extend) is treated as unfixable and
-rejects the whole candidate, since deleting a word can't fix a sentence whose entire *claim* is
-out-of-world. Wired into `QueueGroupMessage` (the single funnel every group-visible line passes
-through regardless of producer), the whisper display block, and the final display boundary as a
-safety net.
+Current source now keeps the authorities separate:
 
-Also found and fixed in the same pass: `PartyReplyIntentClassifier.Classify` checked the generic
-factual-lookup heuristic *before* the existing "what do you think"/opinion check, so
-`"dancer what do you think about being a windblade?"` (mentions a class name + a question word)
-tripped the factual-lookup branch and got routed into wiki-relationship grounding an opinion can
-never satisfy — collapsing to the unknown-fact fallback (`"No idea, honestly."`) even once
-identity was verified. Fixed by reordering the existing checks, not adding new logic. Also added
-an explicit verified-class-vs-asked-class cross-reference line to the prompt's identity block, so
-the model is told authoritatively whether the speaker actually is the class being asked about
-rather than only being shown a wiki definition of the class in the abstract.
+- native `CharacterClass` -> Sim identity;
+- wiki result -> definition/knowledge only;
+- LLM/memory/name -> never class authority.
 
-**`git diff --check`, privacy scan, and the full deterministic test suite (222 pre-existing + all
-new regression cases covering the exact lines above) all pass. This is still only build/test
-evidence.**
+The subjective/identity/factual routing changes below are **SOURCE VERIFIED / TEST WIRED**, not live verified.
 
-### DO NOT claim this works in-game until it is live retested.
+### Duplicate native-Lunaris discovery — LIVE VERIFIED; coexistence still unresolved
 
-Nobody has run the game with the Round 2 fix installed as of this writing. The diagnostic log
-lines described above should make the next live pass conclusive either way.
+The supplied log shows a full native-plugin discovery/load pass, then another `Plugin found:`/load pass for the same suite plugins in a different order, including Deep Sims, with no visible `OnDestroy` between those passes. Non-native Adventure Guide / Auto Sort do not show the same native discovery sequence.
 
-## Known open questions
+This proves duplicate native discovery/Awake-style behavior in the log. It does **not yet prove** two Deep Sims `MonoBehaviour` instances remain concurrently alive. Deep Sims now logs a per-instance serial, Unity instance ID, `Instance` ownership, heartbeat, and destruction state so the next live run can resolve that question. No singleton-suppression hack was added.
 
-- **Final Roleplay output quality after the new central guard** — not yet observed live.
-- **Verified Sim identity/class grounding** — the fix is in; whether it produces good subjective
-  answers in practice (not just "doesn't crash and isn't obviously wrong") needs a real pass.
-- **Template/LLM parity** — whether the deterministic-template Roleplay backend
-  (`RoleplayExpressionRouter`, used when the LLM path is unavailable/disabled) produces output of
-  comparable quality to the now-guarded LLM path. Not compared side by side this session.
-- **Unload/reload pending-request behavior** — not exercised this session.
-- **Duplicate Lunaris plugin instance** — see
-  `Erenshor-Mod-Suite/docs/CURRENT_WORK.md` for the full cross-suite evidence. Deep Sims is one of
-  the affected mods (its own "loaded" line also appeared twice in the same log with no
-  `OnDestroy` between), but Deep Sims does not currently carry the instance-identity diagnostic
-  that `ErenshorContracts` has — if this needs isolating specifically for Deep Sims (e.g. to check
-  whether a duplicate instance could cause double LLM requests/double social-budget consumption),
-  that diagnostic would need to be added here too. Not done yet.
-- **Performance/frame hitches** — several `[DeepSims Perf] frame hitch` lines were observed in the
-  log (155ms-3685ms, at various points including right after plugin bootstrap and during a PvP
-  encounter). Not investigated this session; unclear whether these are Deep-Sims-caused, another
-  mod, or general Unity/Lunaris bootstrap cost. Worth a deeper look if hitching is a live
-  complaint.
-- **Suite UI integration plan** — Deep Sims is slated for a Hub tab in Phase 2 of the suite-wide
-  UI work (see `Erenshor-Mod-Suite/docs/UI_DESIGN.md`/`docs/CURRENT_WORK.md`). Not started. The
-  intended field list for that tab (Ollama/model status, social mode, activity preset,
-  roleplay mode, current party members, memory/session status) is recorded there, not duplicated
-  here.
+### Performance — LIVE VERIFIED correlation only
 
-## Next live tests (exact commands)
+The log includes multi-second frame hitches, but its own Deep Sims measurements show nearby party refreshes completing in roughly sub-10ms samples (examples include 0.5ms, 1.5ms, 9.2ms). That is evidence that those measured refreshes were not themselves multi-second operations; it is not proof that Deep Sims cannot contribute elsewhere.
 
-1. `/dsroleplay on`
-2. `/dsroleplay status` — expect `perspective=Roleplay`.
-3. Group chat: `"dancer what do you think about being a windblade?"` (or whichever Sim's verified
-   class you want to test against) — expect an in-world, class-grounded opinion (something like
-   *"It's suited me fine, I like getting in close"* if the verified class matches what was asked;
-   a natural correction if it doesn't; "I don't know" only if the class genuinely can't be read,
-   which should be rare) — NOT `"No idea, honestly."`, NOT MMO-flavored filler with "lol"/"online"/
-   emoticons.
-4. `/dstalk Dancer what do you think about being a windblade?` (or the equivalent unprompted-line
-   command) for the same check via a different path.
-5. `/dsroleplay off`, repeat steps 3-4, confirm dialogue reverts to ordinary MMO-player framing.
-6. Watch the Lunaris log for the `RoleplayDiag` diagnostic lines throughout — confirmed present in
-   `src/DeepSimsPlugin.cs` as `roleplayGuardRan=True|False roleplayGuardChanged=True|False
-   roleplayGuardRejected=True|False`, replacing the old single ambiguous `roleplayGuardApplied`
-   field. `roleplayGuardRan` should now read `True` on every Roleplay-mode emission (group,
-   whisper, dstalk, autonomous) once this fix is live; `roleplayGuardChanged`/`Rejected` show
-   whether that run actually altered or rejected the candidate.
-7. Separately: run `/dsguardtest` to execute the wired-in deterministic Roleplay regression suite
-   live and confirm it reports all-pass in the actual running game, not just in isolation.
+## Source fixes from the deep audit
 
-## Next deep audit questions
+### 1. Roleplay final-output invariant — SOURCE VERIFIED / TEST WIRED / NEEDS LIVE TEST
 
-- Is `RoleplayOutputGuard`'s reject list (`game`, `server`, `session`, `online`, `dps`, `player`,
-  etc.) too aggressive for legitimate in-world dialogue that happens to need one of those words in
-  a non-meta sense? Word-boundary matching was used deliberately to reduce false positives, but
-  this hasn't been stress-tested against a large volume of real generated dialogue.
-- Does the texture-stripping half of the guard (as opposed to the full-reject half) ever produce
-  an awkward or grammatically broken sentence when it removes a trailing "lol"/":D"? Worth
-  sampling real output.
-- Is there a cleaner architectural place for perspective-aware output enforcement than dispatch
-  wrappers scattered at each call site — e.g. could `QueueGroupMessage` alone be made the single
-  mandatory gate for literally every group-visible line, removing the need for the whisper/other
-  call-site-specific wiring? (Whisper doesn't currently route through `QueueGroupMessage` for
-  structural reasons — worth understanding whether that's a real architectural boundary or
-  incidental.)
-- The `PartyReplyIntentClassifier` reorder fixed one specific misclassification
-  ("what do you think about being a windblade") — are there other phrasings of the same
-  subjective-about-a-verified-fact pattern that still misclassify?
+For Sim-spoken visible chat:
+
+- **group speech:** every producer funnels through `QueueGroupMessage`; the main-thread display path then reacquires the speaker, applies native typing style/sanitization, and runs `RoleplayOutputGuard` again immediately before `WriteChat`;
+- **whispers:** the final main-thread whisper candidate runs the same guard immediately before persistence/display.
+
+A real bypass was fixed: when a whisper candidate was rejected and replaced with a deterministic fallback, the replacement was previously displayed without a second final validation. Replacement candidates are now treated as new candidates and validated again.
+
+The Roleplay vocabulary was also narrowed to avoid breaking ordinary in-world language. Structural phrases such as `this game`, `the game`, `player character`, `hit me up`, login/server/internet language, etc. reject/regenerate/suppress; typed-chat texture such as `lol`, `lmao`, `heh`, `haha`, `XD`, common emoticons, etc. is sanitize-able. Ordinary phrases such as `a game of dice`, `training session`, and `lute player` are allowed.
+
+MMO perspective does not run the Roleplay guard.
+
+### 2. Roleplay Templates/LLM parity — SOURCE VERIFIED / TEST WIRED / NEEDS LIVE TEST
+
+Roleplay already had separate ambient/event templates, but two deterministic paths still called MMO `SocialTemplates` directly:
+
+- player ritual replies;
+- Sim-to-Sim thread continuations.
+
+Roleplay now uses Roleplay-specific deterministic renderers for those paths. MMO templates remain unchanged.
+
+### 3. Identity-fact vs factual-definition vs subjective opinion — SOURCE VERIFIED / TEST WIRED / NEEDS LIVE TEST
+
+`PartyReplyIntent` now distinguishes:
+
+- `What is a Windblade?` -> factual game knowledge;
+- `Are you a Windblade?` / `Is Dancer a Windblade?` -> native identity fact;
+- `What do you think about being a Windblade?` -> subjective opinion.
+
+Opinion phrases are checked before broad factual heuristics. Prompt context explicitly cross-references the asked class with the Sim's verified native class. Grounding still rejects contradictory class claims, while bounded preference/opinion answers do not require fabricated historical evidence.
+
+### 4. Per-character Deep Sims memory — SOURCE VERIFIED / TEST WIRED / NEEDS LIVE TEST
+
+Previously, all Sim memory JSON lived in one global `Memory/` namespace, so familiarity, rapport, preferences, conversation history, and outing-derived social state could leak between player characters.
+
+Memory now lives under:
+
+`plugins/config/DeepSims/Memory/Characters/<character-key>/`
+
+The key follows the suite's already-used convention: verified save-slot index + live character name where available, otherwise a sanitized name fallback. Old flat memory is preserved as **unscoped legacy data** and is deliberately not silently assigned to whichever character is currently loaded.
+
+Character switching invalidates pending request lanes, whisper generations, conversation generation, delayed group output, queued main-thread callbacks, recent AI/chat context, social cadence/director state, telemetry, external-news context, and Roleplay transient context before the new memory store is installed.
+
+Additional races found and closed:
+
+- stale conversation continuations cannot post-loop write character A's social thread into character B's memory;
+- delayed continuation inference reads from the memory store it started with, not whichever store is current later;
+- stale autonomous topic/preference callbacks cannot mutate the new character's director/memory;
+- a stale party external-news lookup cannot seed the new character/topic's temporary news cache.
+
+Name-only fallback can still collide if two save slots use the same character name and no trustworthy slot can be read. This is a documented fallback, not a hidden guarantee.
+
+### 5. Lunaris unload cleanup — SOURCE VERIFIED / NEEDS LIVE STRESS TEST
+
+`OnDestroy()` now additionally clears Deep Sims-owned static runtime state:
+
+- legacy embedded `/dsfollow` target/state;
+- Duel social dedup/counters;
+- PvP social dedup window;
+- Nemesis social dedup window.
+
+Existing teardown already stops request admission, clears pending lanes, advances conversation generation, clears delayed display and main-thread closures, flushes telemetry/memory, unsubscribes COOP/Campmaster `AssemblyLoad` handlers, removes Harmony patches, and resets Roleplay/static singleton state.
+
+There is intentionally no `SemaphoreSlim.Dispose()` while an in-flight worker may still release it.
+
+**Residual release blocker:** in-flight `HttpWebRequest` work is bounded by timeout but is not actively cancelled on unload. Source gates make its late display/persistence inert, but an old network call can still finish after unload and can overlap a newly enabled instance. The exact unload-pending-request/re-enable scenario therefore still requires live stress testing before release.
+
+### 6. Default-log privacy — SOURCE VERIFIED / TEST WIRED / NEEDS LOCAL VERIFICATION
+
+The old live DLL logged truncated Ollama request JSON and raw model reply text. Those can include player chat, retrieved facts, and bounded memory context.
+
+Current source now logs request/response metadata instead of payload content: model, message count, character counts, eval counts, timing/outcome. Wiki/news/external-news diagnostics likewise omit raw user query text. Generated rejected/duplicate/final lines are no longer dumped into ordinary diagnostic logs.
+
+`/dsexport` remains an explicit user action and can contain session/social history; its chat response now labels the export private and shows only a Deep-Sims-relative filename. `/dsdump` likewise no longer prints a full absolute path and warns the user to review the diagnostic before sharing. File-operation logs use exception types rather than path-bearing exception messages.
+
+### 7. Suite Hub optional API — SOURCE VERIFIED / TEST WIRED / NEEDS INTEGRATION TEST
+
+Added `DeepSimsControlApi` schema v1. It is optional and late-bound; Deep Sims has no Hub dependency.
+
+Exposed status is primitive/string-only and normal-player-safe: module/version, coarse Ollama status/model, social mode/activity, perspective, coarse character/memory-writer health, active Deep Sim summary, and session summary. Safe setters exist for social mode/activity/Roleplay plus status refresh.
+
+It does not expose API keys, raw memories, thread/task objects, Unity objects, arbitrary command execution, or gameplay-control actions.
+
+## Tests / build status
+
+The standalone deterministic runner now calls **13 suites**, including Roleplay, character scope, Hub control policy, diagnostic privacy, and Duel lifecycle dedup reset. The PowerShell runner lists all required pure source files and no referenced test source is missing.
+
+This Linux audit environment has no Windows `csc.exe`, PowerShell, Mono, or supplied current Erenshor/Lunaris managed reference DLLs, so the deterministic executable and full runtime build could not be executed here. Static delimiter/wiring checks passed, but actual compilation/execution is **NEEDS LOCAL VERIFICATION**.
+
+Exact local commands are in `docs/HANDOFF_FOR_DEEP_AUDIT.md` and the audit ZIP's `HANDOFF.md`.
+
+## Release blockers / next live checks
+
+1. Run Roleplay + LLM exact bad-line regression and Windblade subjective/identity/factual matrix.
+2. Run Roleplay + Templates and MMO + Templates parity checks.
+3. Run pending-Ollama Lunaris unload/re-enable 3-5 times; no old output, no duplicated command/reply paths.
+4. Use the new instance diagnostics to establish whether two Deep Sims instances coexist during the suite-wide duplicate native discovery.
+5. Switch between two player characters and verify memory/social context never crosses scopes.
+6. Re-run `/dsperf` during a real hitch and correlate measured Deep Sims stage times without claiming causation from timing alone.

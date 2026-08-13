@@ -147,6 +147,25 @@ namespace ErenshorDeepSims
                 }
             }
             Add(r, "no RP template contains MMO meta language" + (clean ? "" : " (" + why + ")"), clean);
+
+            SimSnapshot ritualSim = new SimSnapshot { Name = "Dancer", ClassName = "Windblade" };
+            string ritual;
+            bool ritualRendered = RoleplayTemplates.TryRenderPlayerRitual("gg", ritualSim, out ritual);
+            bool ritualChanged, ritualRejected;
+            string ritualGuarded = RoleplayOutputGuard.Enforce(ritual, ritualSim.Name, out ritualChanged, out ritualRejected);
+            Add(r, "RP ritual template renders spoken in-world text", ritualRendered && !ritualRejected && ritualGuarded == ritual);
+            Add(r, "RP ritual template does not echo MMO gg texture", ritual.IndexOf("gg", StringComparison.OrdinalIgnoreCase) < 0);
+            string mmoRitual;
+            Add(r, "MMO ritual renderer remains distinct",
+                SocialTemplates.TryRenderPlayerRitual("gg", ritualSim, out mmoRitual) && mmoRitual == "gg");
+
+            string threadReply;
+            bool threadRendered = RoleplayTemplates.TryRenderThreadReply("what is your favorite class?", ritualSim, out threadReply);
+            bool threadChanged, threadRejected;
+            string guardedThread = RoleplayOutputGuard.Enforce(threadReply, ritualSim.Name, out threadChanged, out threadRejected);
+            Add(r, "RP thread template renders from verified own class",
+                threadRendered && threadReply.IndexOf("Windblade", StringComparison.OrdinalIgnoreCase) >= 0);
+            Add(r, "RP thread template passes final roleplay guard", !threadRejected && guardedThread == threadReply);
         }
 
         // ---- guards ---------------------------------------------------------------------------
@@ -710,7 +729,7 @@ namespace ErenshorDeepSims
                 Add(r, "live regression line reports ran/changed-or-rejected: \"" + liveRegressionLines[i] + "\"", changed || rejected);
             }
 
-            // Core-content vocabulary (online/offline/server/session/NES/etc.) is unfixable by
+            // Core-content vocabulary (online/offline/server/NES and structural meta phrases) is unfixable by
             // stripping a single token, so it must fully reject rather than leave a mangled sentence.
             bool onlineChanged, onlineRejected;
             string onlineResult = RoleplayOutputGuard.Enforce("nice to see you online again", "Dancer", out onlineChanged, out onlineRejected);
@@ -726,6 +745,56 @@ namespace ErenshorDeepSims
             string cleanResult = RoleplayOutputGuard.Enforce("Stay sharp.", "Dancer", out cleanChanged, out cleanRejected);
             Add(r, "clean RP line survives the central guard untouched", cleanResult == "Stay sharp." && !cleanChanged && !cleanRejected);
 
+            // Do not over-filter ordinary in-world senses of words that also have a software/MMO
+            // meaning. Structural meta phrases are rejected, not these harmless uses.
+            bool diceChanged, diceRejected;
+            string dice = RoleplayOutputGuard.Enforce("A game of dice sounds fine.", "Dancer", out diceChanged, out diceRejected);
+            Add(r, "ordinary in-world use of game is allowed", !diceRejected && dice == "A game of dice sounds fine.");
+            bool trainingChanged, trainingRejected;
+            string training = RoleplayOutputGuard.Enforce("That training session helped.", "Dancer", out trainingChanged, out trainingRejected);
+            Add(r, "ordinary in-world use of session is allowed", !trainingRejected && training == "That training session helped.");
+            bool musicianChanged, musicianRejected;
+            string musician = RoleplayOutputGuard.Enforce("That lute player is good.", "Dancer", out musicianChanged, out musicianRejected);
+            Add(r, "ordinary in-world use of player is allowed", !musicianRejected && musician == "That lute player is good.");
+
+            bool steamChanged, steamRejected;
+            string steam = RoleplayOutputGuard.Enforce("Steam rises from the forge.", "Dancer", out steamChanged, out steamRejected);
+            Add(r, "ordinary in-world use of steam is allowed", !steamRejected && steam == "Steam rises from the forge.");
+
+            bool discordChanged, discordRejected;
+            string discord = RoleplayOutputGuard.Enforce("There is discord among them.", "Dancer", out discordChanged, out discordRejected);
+            Add(r, "ordinary in-world use of discord is allowed", !discordRejected && discord == "There is discord among them.");
+
+            bool platformChanged, platformRejected;
+            RoleplayOutputGuard.Enforce("I saw that on Steam.", "Dancer", out platformChanged, out platformRejected);
+            Add(r, "platform phrase on Steam is rejected", platformRejected);
+
+            bool discordServerChanged, discordServerRejected;
+            RoleplayOutputGuard.Enforce("Check the Discord server.", "Dancer", out discordServerChanged, out discordServerRejected);
+            Add(r, "Discord server phrase is rejected", discordServerRejected);
+
+            bool metalChanged, metalRejected;
+            string metal = RoleplayOutputGuard.Enforce("Add metal to the pile.", "Dancer", out metalChanged, out metalRejected);
+            Add(r, "phrase boundary does not reject add metal as add me", !metalRejected && metal == "Add metal to the pile.");
+
+            bool gamekeeperChanged, gamekeeperRejected;
+            string gamekeeper = RoleplayOutputGuard.Enforce("The gamekeeper knows the trail.", "Dancer", out gamekeeperChanged, out gamekeeperRejected);
+            Add(r, "phrase boundary does not reject gamekeeper as the game", !gamekeeperRejected && gamekeeper == "The gamekeeper knows the trail.");
+
+            bool ordinaryChatChanged, ordinaryChatRejected;
+            string ordinaryChat = RoleplayOutputGuard.Enforce("We can chat later.", "Dancer", out ordinaryChatChanged, out ordinaryChatRejected);
+            Add(r, "ordinary conversational use of chat is allowed", !ordinaryChatRejected && ordinaryChat == "We can chat later.");
+
+            bool chatUiChanged, chatUiRejected;
+            RoleplayOutputGuard.Enforce("My chat ate that.", "Dancer", out chatUiChanged, out chatUiRejected);
+            Add(r, "chat UI failure framing is rejected", chatUiRejected);
+
+            bool thisGameChanged, thisGameRejected;
+            RoleplayOutputGuard.Enforce("This game has good combat.", "Dancer", out thisGameChanged, out thisGameRejected);
+            Add(r, "structural meta phrase this game is rejected", thisGameRejected);
+            Add(r, "Roleplay guard rejects structural the-game meta phrase",
+                RoleplayOutputGuard.ContainsRejectableCore("The game has good combat."));
+
             // NO_MESSAGE is left alone, never turned into a rejection or new speech.
             bool noMsgChanged, noMsgRejected;
             string noMsgResult = RoleplayOutputGuard.Enforce("NO_MESSAGE", "Dancer", out noMsgChanged, out noMsgRejected);
@@ -736,6 +805,73 @@ namespace ErenshorDeepSims
             bool narrationChanged, narrationRejected;
             RoleplayOutputGuard.Enforce("Dancer smiles.", "Dancer", out narrationChanged, out narrationRejected);
             Add(r, "central guard rejects self-narration", narrationRejected);
+
+            // ---- gaming-meta vocabulary regression (live test: "dancer what do you think of being a
+            // windblade?" produced "...I'm totally fine sticking with my own playstyle" -- structurally
+            // clean but "playstyle" is still a player-at-a-keyboard word an in-world adventurer would
+            // never use about themselves). Required regression per the follow-up briefing:
+            //   Roleplay: "I prefer fighting up close." => PASS (unaffected)
+            //   Roleplay: "It fits my playstyle."       => REJECT
+            //   MMO:      "It fits my playstyle."       => ALLOWED (perspective-gated, unaffected)
+            bool closeChanged, closeRejected;
+            string closeResult = RoleplayOutputGuard.Enforce("I prefer fighting up close.", "Dancer", out closeChanged, out closeRejected);
+            Add(r, "REQUIRED: ordinary in-character combat preference is not flagged",
+                !closeRejected && !closeChanged && closeResult == "I prefer fighting up close.");
+
+            bool playstyleChanged, playstyleRejected;
+            string playstyleResult = RoleplayOutputGuard.Enforce("It fits my playstyle.", "Dancer", out playstyleChanged, out playstyleRejected);
+            Add(r, "REQUIRED: Roleplay rejects gaming-meta 'playstyle'", playstyleRejected && playstyleResult == "NO_MESSAGE");
+
+            // MMO perspective must never run this guard at all. GuardGeneratedAutonomousLine's
+            // roleplayActive flag is exactly the boundary every DeepSimsPlugin call site gates on
+            // (SocialPerspectiveState.RoleplayActive), so exercising it here with roleplayActive=false
+            // proves the guard is perspective-scoped rather than merely re-testing string matching.
+            SimSnapshot metaSim = new SimSnapshot();
+            metaSim.Name = "Dancer";
+            Add(r, "REQUIRED: MMO perspective allows 'playstyle' through untouched",
+                RoleplayExpressionRouter.GuardGeneratedAutonomousLine("It fits my playstyle.", "rp_place", 1, metaSim, false) == "It fits my playstyle.");
+
+            // Related-family terms, same tier (unambiguous by themselves; rejected outright).
+            bool minmaxChanged, minmaxRejected;
+            RoleplayOutputGuard.Enforce("I like to minmax everything.", "Dancer", out minmaxChanged, out minmaxRejected);
+            Add(r, "gaming-meta 'minmax' is rejected", minmaxRejected);
+            bool metaBuildChanged, metaBuildRejected;
+            RoleplayOutputGuard.Enforce("That's the meta build right now.", "Dancer", out metaBuildChanged, out metaBuildRejected);
+            Add(r, "structural phrase 'meta build' is rejected", metaBuildRejected);
+            bool dpsRotationChanged, dpsRotationRejected;
+            RoleplayOutputGuard.Enforce("Just follow the dps rotation.", "Dancer", out dpsRotationChanged, out dpsRotationRejected);
+            Add(r, "structural phrase 'dps rotation' is rejected", dpsRotationRejected);
+            bool altChanged, altRejected;
+            RoleplayOutputGuard.Enforce("I'm on my alt right now.", "Dancer", out altChanged, out altRejected);
+            Add(r, "structural phrase 'on my alt' is rejected", altRejected);
+            bool toonChanged, toonRejected;
+            RoleplayOutputGuard.Enforce("My toon looks great today.", "Dancer", out toonChanged, out toonRejected);
+            Add(r, "structural phrase 'my toon' is rejected", toonRejected);
+
+            // Ambiguity safety net: the individual words that make up the family above have ordinary
+            // in-world senses and must NOT be flagged on their own -- only the unambiguous structural
+            // combinations or standalone gaming-only words (checked above) are.
+            bool buildChanged, buildRejected;
+            string buildResult = RoleplayOutputGuard.Enforce("I'll build a fire before dark.", "Dancer", out buildChanged, out buildRejected);
+            Add(r, "ordinary in-world 'build' (construct) is allowed", !buildRejected && buildResult == "I'll build a fire before dark.");
+            bool mainChanged, mainRejected;
+            string mainResult = RoleplayOutputGuard.Enforce("The main road leads north from here.", "Dancer", out mainChanged, out mainRejected);
+            Add(r, "ordinary in-world 'main' (adjective) is allowed", !mainRejected && mainResult == "The main road leads north from here.");
+            bool rotationChanged, rotationRejected;
+            string rotationResult = RoleplayOutputGuard.Enforce("The wheel's rotation slowed down.", "Dancer", out rotationChanged, out rotationRejected);
+            Add(r, "ordinary physical 'rotation' is allowed", !rotationRejected && rotationResult == "The wheel's rotation slowed down.");
+            bool specChanged, specRejected;
+            string specResult = RoleplayOutputGuard.Enforce("Let me spec out the plan first.", "Dancer", out specChanged, out specRejected);
+            Add(r, "ordinary in-world 'spec' (verb) is allowed", !specRejected && specResult == "Let me spec out the plan first.");
+
+            // Prompt-level coverage: the identity block itself must teach the model to avoid this
+            // vocabulary family, since the final guard is deliberately narrow and cannot catch every
+            // paraphrase (e.g. "I'd rather fight my own way" leaking as "I'm a melee spec").
+            string metaGuidance = RoleplayPromptContract.BuildIdentityBlock(SocialPerspectiveMode.Roleplay, "Phanty").ToLowerInvariant();
+            Add(r, "RP identity block warns against gaming-meta vocabulary",
+                metaGuidance.IndexOf("playstyle", StringComparison.Ordinal) >= 0 &&
+                metaGuidance.IndexOf("'build'", StringComparison.Ordinal) >= 0 &&
+                metaGuidance.IndexOf("'spec'", StringComparison.Ordinal) >= 0);
         }
 
         // ---- identity-aware routing: verified class fact vs. subjective opinion question ----------
@@ -748,6 +884,10 @@ namespace ErenshorDeepSims
             PartyReplyIntent classified = PartyReplyIntentClassifier.Classify("dancer what do you think about being a windblade?");
             Add(r, "'what do you think about being X' classifies as Opinion", classified == PartyReplyIntent.Opinion);
             Add(r, "'what do you think about being X' is subjective", PartyReplyIntentClassifier.IsSubjective(classified));
+            Add(r, "'are you a Windblade' classifies as IdentityFact",
+                PartyReplyIntentClassifier.Classify("dancer are you a windblade?") == PartyReplyIntent.IdentityFact);
+            Add(r, "'what is a Windblade' remains factual",
+                PartyReplyIntentClassifier.Classify("what is a windblade?") == PartyReplyIntent.FactualGameQuestion);
 
             // PromptBuilder's identity-vs-asked-class cross reference: when the wiki lookup target is a
             // known class name, the system prompt must state plainly whether the speaker's OWN verified

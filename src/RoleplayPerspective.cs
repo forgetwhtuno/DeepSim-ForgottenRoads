@@ -101,6 +101,7 @@ namespace ErenshorDeepSims
             sb.AppendLine("Talk like a real person: plain, current, direct. Short. Usually one sentence, often only a few words.");
             sb.AppendLine("Dry humour, bluntness, worry, curiosity, and simply saying nothing are all natural.");
             sb.AppendLine("You do not decide what anyone does. You never give or follow gameplay orders.");
+            sb.AppendLine("Never describe yourself, your abilities, or your choices using gaming-mechanics vocabulary such as 'playstyle', 'build', 'spec', 'meta', 'rotation', 'main', 'alt', or 'toon' -- that is how a player at a keyboard talks ABOUT a character, not how you experience your own life. If asked why you fight or live the way you do, talk about what you prefer, what suits you, or how you fight -- never about a 'build' or a 'playstyle'.");
             return sb.ToString();
         }
 
@@ -274,20 +275,43 @@ namespace ErenshorDeepSims
     {
         // Data, not scattered logic: extend these arrays to teach the guard a new out-of-world
         // concept. Word entries are matched with \b boundaries; phrase entries match with flexible
-        // internal whitespace. Kept deliberately narrow and perspective-specific -- the same words
-        // are legitimate in MMO perspective and in direct mechanics answers, neither of which this
-        // guard runs against (see ApplyRoleplayAutonomousGuard/GroundPartyLineAsync callers).
+        // internal whitespace. Kept deliberately narrow and perspective-specific. MMO perspective
+        // never runs this guard. Roleplay does run it for every final spoken candidate, including
+        // direct replies, so ambiguous ordinary words are rejected only in structural meta phrases.
         internal static readonly string[] RejectCoreWords = new string[]
         {
-            "game", "server", "session", "online", "offline", "dps", "player",
-            "nes", "playstation", "xbox", "nintendo", "wifi", "internet", "discord", "steam"
+            // Keep this list to concepts that are unambiguously out-of-world by themselves.
+            // Ordinary words such as "game", "session", and "player" are deliberately NOT here:
+            // an adventurer can play a dice game, attend a training session, or call a musician a
+            // player. Structural meta uses of those words are handled by phrases below.
+            "server", "online", "offline", "dps",
+            "nes", "playstation", "xbox", "nintendo", "wifi", "internet",
+            // Gaming-meta character vocabulary. "playstyle" and "minmax(ing)" are unambiguous by
+            // themselves -- no ordinary in-world sentence uses these words -- unlike "build", "spec",
+            // "meta", "rotation", "main", or "alt", which all have legitimate in-world senses
+            // (construct/create, keg tap, coin, a physical turn, a chief consideration, a second
+            // weapon) and are deliberately left out of this word list. Those are handled instead by
+            // the prompt-level guidance above and, where the combination is itself unambiguous, by
+            // the structural phrases below.
+            "playstyle", "minmax", "min-max", "minmaxing"
         };
 
         internal static readonly string[] RejectCorePhrases = new string[]
         {
             "hit me up", "add me", "friend request",
             "log in", "log out", "logged in", "logged out", "logging in", "logging out",
-            "my character", "your character", "this character"
+            "my character", "your character", "this character", "player character",
+            "this game", "the game", "video game", "in game", "game server", "gameplay",
+            "this session", "login session", "play session",
+            "on discord", "discord server", "discord channel",
+            "on steam", "steam account", "steam client",
+            "chat ate", "chat window", "chat box", "party chat", "group chat",
+            // Structural combinations that are unambiguously gaming-meta even though their individual
+            // words ("build", "spec", "meta", "rotation", "main", "alt", "toon") are not: "meta build"
+            // and "dps rotation" only ever mean the game-mechanics concept, and "my/your toon" and
+            // "my/your alt [character]" are gaming-only usages of otherwise rare/absent in-world words.
+            "meta build", "dps rotation",
+            "my toon", "your toon", "my alt character", "your alt character", "on my alt"
         };
 
         private static readonly Regex RejectCoreRegex = BuildRejectRegex();
@@ -298,7 +322,20 @@ namespace ErenshorDeepSims
             for (int i = 0; i < RejectCoreWords.Length; i++)
                 parts.Add(@"\b" + Regex.Escape(RejectCoreWords[i]) + @"\b");
             for (int i = 0; i < RejectCorePhrases.Length; i++)
-                parts.Add(Regex.Escape(RejectCorePhrases[i]).Replace(" ", @"\s+"));
+            {
+                // Regex.Escape() already escapes whitespace itself (turning a plain space into the
+                // two-character sequence "\ "), so escaping the whole phrase first and then trying
+                // to replace its (now-escaped-away) spaces with "\s+" never finds a bare space to
+                // replace and instead corrupts the pattern (each "\ " becomes "\\s+", i.e. a literal
+                // backslash followed by one-or-more literal 's' characters, which cannot match real
+                // text). Escaping each word independently and joining with a literal \s+ avoids that
+                // trap entirely and is what silently disabled every multi-word phrase below (e.g.
+                // "this game", "on steam", "my character", "hit me up").
+                string[] words = RejectCorePhrases[i].Split(' ');
+                string[] escapedWords = new string[words.Length];
+                for (int w = 0; w < words.Length; w++) escapedWords[w] = Regex.Escape(words[w]);
+                parts.Add(@"(?<!\w)" + string.Join(@"\s+", escapedWords) + @"(?!\w)");
+            }
             return new Regex(string.Join("|", parts.ToArray()), RegexOptions.IgnoreCase | RegexOptions.Compiled);
         }
 
@@ -790,6 +827,70 @@ namespace ErenshorDeepSims
             else return false;
 
             return !string.IsNullOrEmpty(message);
+        }
+
+        // Deterministic response to the player's short MMO-style ritual input while the Sim is
+        // speaking in Roleplay perspective. The PLAYER may type "gg"/"brb"/"lol"; the Sim's
+        // reply still has to be spoken as the in-world adventurer. This deliberately does not mutate
+        // SocialTemplates, so MMO perspective keeps its existing party-chat texture.
+        internal static bool TryRenderPlayerRitual(string playerMessage, SimSnapshot speaker, out string message)
+        {
+            message = string.Empty;
+            if (speaker == null || !SocialPolicy.IsRitualPlayerMessage(playerMessage)) return false;
+            string m = playerMessage.Trim().ToLowerInvariant().Trim('.', '!', '?', ' ');
+            int seed = StableHash(m + "|rpritual|" + (speaker.Name ?? string.Empty));
+
+            if (m == "ding") message = Pick(seed, new string[] { "Well done.", "Nicely done." });
+            else if (m == "grats" || m == "gz" || m == "congrats") message = Pick(seed, new string[] { "Thank you.", "Much appreciated." });
+            else if (m == "gg") message = Pick(seed, new string[] { "Well fought.", "Good fight." });
+            else if (m == "inc" || m == "incoming") message = "Ready.";
+            else if (m == "ready") message = "Ready.";
+            else if (m == "brb") message = Pick(seed, new string[] { "I'll wait.", "Take your time." });
+            else if (m == "wb") message = Pick(seed, new string[] { "Good.", "There you are." });
+            else if (m == "nice") message = Pick(seed, new string[] { "Agreed.", "That went well." });
+            else if (m == "ouch" || m == "rip") message = Pick(seed, new string[] { "Careful.", "That hurt." });
+            else if (m == "lol" || m == "lmao") message = Pick(seed, new string[] { "Fair.", "You enjoyed that." });
+            else if (m == "ty" || m == "thanks") message = Pick(seed, new string[] { "Of course.", "Any time." });
+            return !string.IsNullOrWhiteSpace(message);
+        }
+
+        // Roleplay counterpart to SocialTemplates.TryRenderThreadReply. It handles only the small
+        // deterministic topic set that Templates mode already knows how to continue and returns false
+        // for everything else. Native verified class may colour a response; no class is inferred.
+        internal static bool TryRenderThreadReply(string latestText, SimSnapshot speaker, out string message)
+        {
+            message = string.Empty;
+            if (speaker == null || string.IsNullOrWhiteSpace(latestText)) return false;
+            string m = latestText.Trim().ToLowerInvariant();
+            int seed = StableHash(m + "|rpthread|" + (speaker.Name ?? string.Empty));
+            string cls = string.IsNullOrWhiteSpace(speaker.ClassName) ? string.Empty : speaker.ClassName.Trim();
+            string clsLower = cls.ToLowerInvariant();
+
+            if (m.Contains("tank") && (m.Contains("hard") || m.Contains("job") || m.Contains("harder")))
+            {
+                message = clsLower == "druid"
+                    ? Pick(seed, new string[] { "Keeping them standing isn't easy either.", "I worry more about keeping everyone alive." })
+                    : Pick(seed, new string[] { "Holding the front takes nerve.", "I wouldn't call it easy." });
+                return true;
+            }
+            if (m.Contains("heal") && (m.Contains("hard") || m.Contains("job")))
+            {
+                message = Pick(seed, new string[] { "Keeping everyone standing isn't easy.", "Watching everyone at once takes focus." });
+                return true;
+            }
+            if (m.Contains("favorite") && m.Contains("class"))
+            {
+                message = string.IsNullOrWhiteSpace(cls)
+                    ? Pick(seed, new string[] { "I care more about how someone fights.", "Hard to choose without knowing them better." })
+                    : Pick(seed, new string[] { "I'm comfortable as a " + cls + ".", "Being a " + cls + " suits me." });
+                return true;
+            }
+            if (m.EndsWith("?", StringComparison.Ordinal) && (m.Contains("agree") || m.Contains("right")))
+            {
+                message = Pick(seed, new string[] { "I do.", "That sounds right." });
+                return true;
+            }
+            return false;
         }
 
         internal static string Pick(int seed, string[] options)

@@ -17,6 +17,9 @@ namespace ErenshorDeepSims
             result = PrintAndCheck(ConversationTurnGuardTests.Run(), result);
             result = PrintAndCheck(ConversationPacingTests.Run(), result);
             result = PrintAndCheck(RoleplayDeterministicTests.RunSelfTests(), result);
+            result = PrintAndCheck(CharacterScopeDeterministicTests.Run(), result);
+            result = PrintAndCheck(DeepSimsControlPolicyTests.Run(), result);
+            result = PrintAndCheck(DiagnosticPrivacyTests.Run(), result);
             return result;
         }
 

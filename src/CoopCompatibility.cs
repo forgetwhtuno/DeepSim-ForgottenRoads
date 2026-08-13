@@ -21,7 +21,7 @@ namespace ErenshorDeepSims
 
         // Type resolution used to walk every loaded assembly on each call, from paths as hot as
         // per-chat-line and per-damage-tick. Resolve once and invalidate only when the CLR actually
-        // loads something new, which covers BepInEx loading COOP after this plugin.
+        // loads something new, which covers another loader/plugin manager loading COOP after this plugin.
         private static readonly object ResolveLock = new object();
         private static volatile bool _resolved;
         private static Type _networkedPlayer;
@@ -34,11 +34,33 @@ namespace ErenshorDeepSims
 
         static CoopCompatibility()
         {
-            try
-            {
-                AppDomain.CurrentDomain.AssemblyLoad += delegate { _resolved = false; };
-            }
+            try { AppDomain.CurrentDomain.AssemblyLoad += OnAssemblyLoad; }
             catch { }
+        }
+
+        private static void OnAssemblyLoad(object sender, AssemblyLoadEventArgs args)
+        {
+            _resolved = false;
+        }
+
+        // Lunaris can unload this assembly at runtime. AppDomain events outlive plugin GameObjects, so
+        // an unremoved handler would retain a delegate into the old Deep Sims assembly. Clear both the
+        // handler and reflected cross-mod types during teardown; a reloaded assembly gets fresh statics.
+        internal static void Shutdown()
+        {
+            try { AppDomain.CurrentDomain.AssemblyLoad -= OnAssemblyLoad; }
+            catch { }
+            lock (ResolveLock)
+            {
+                _resolved = false;
+                _networkedPlayer = null;
+                _legacyNetworkedPlayer = null;
+                _networkedSim = null;
+                _clientConnectionManager = null;
+                _serverConnectionManager = null;
+                _clientGroup = null;
+                _gameHooks = null;
+            }
         }
 
         private static void EnsureResolved()

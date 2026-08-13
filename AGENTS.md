@@ -5,12 +5,12 @@
 Save this file as UTF-8. Do not commit credentials, API keys, private endpoints,
 or generated personal-memory files.
 
-This repository contains **Deep Sims for Erenshor**, an experimental BepInEx mod that adds a local-LLM social layer to Erenshor's existing SimPlayers.
+This repository contains **Deep Sims for Erenshor**, a native-Lunaris migration candidate that adds a local-LLM social layer to Erenshor's existing SimPlayers. Harmony remains an intentional narrow game-hook layer; BepInEx is no longer the native plugin/config/logging dependency.
 
 The project goal is to make Sims feel like persistent MMO friends: aware of the current party, recent fights, shared history, loot, zones, and conversations, while still behaving like Erenshor Sims rather than AI assistants.
 
 **Current development line:** 0.7.x
-**Current development baseline:** 0.7.0
+**Current development baseline:** 0.7.1 native-Lunaris migration candidate
 
 ---
 
@@ -229,7 +229,9 @@ When asked to continue development:
 9. Keep performance-sensitive Unity work off hot paths where possible.
 10. Keep network, wiki, and news access optional and narrow.
 11. Compile/test when the repository provides a usable build path.
-12. Update documentation and this task list when behavior changes.
+12. For native Lunaris work, treat `OnDestroy()` cleanup and repeated hot unload/reload as correctness requirements: remove Harmony patches, stop/neutralize background work, clear callbacks/statics, and never allow a late inference result to write chat.
+13. Do not introduce a Lunaris command/config/event callback that cannot be proven unload-safe; preserve the existing Harmony command parser when the native API cannot express its grammar or unregister semantics safely.
+14. Update documentation and this task list when behavior changes.
 
 For roadmap items, define a concrete acceptance check before marking the item
 complete. The check should state what can be observed in code, diagnostics, or

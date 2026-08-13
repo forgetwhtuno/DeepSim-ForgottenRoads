@@ -6,7 +6,7 @@ namespace ErenshorDeepSims
     // Deterministic coverage for party-conversation turn ownership (ConversationTurnGuard). These tests
     // exercise the pure decision logic that backs the async generation/staleness pipeline in
     // DeepSimsPlugin.cs (QueuePartyChatResponse / ContinueConversationThreadAsync / etc.), which itself
-    // cannot compile in the offline regression harness because it depends on BepInEx/Unity.
+    // cannot compile in the offline regression harness because it depends on framework/Unity.
     internal static class ConversationTurnGuardTests
     {
         internal static List<string> Run()

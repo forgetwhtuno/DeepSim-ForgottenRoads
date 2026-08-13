@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace ErenshorDeepSims
 {
-    // Pure, Unity/BepInEx-free helpers for party-conversation turn ownership. DeepSimsPlugin.cs owns
+    // Pure, Unity/framework-free helpers for party-conversation turn ownership. DeepSimsPlugin.cs owns
     // the actual generation counter (_partyConversationGeneration) and the async request pipeline; this
     // class holds the deterministic decision logic so it can be covered by the offline regression suite
     // (tests/RUN_DETERMINISTIC_TESTS.ps1) without needing the game assemblies.

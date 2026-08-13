@@ -1,4 +1,3 @@
-using BepInEx.Logging;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -12,7 +11,7 @@ namespace ErenshorDeepSims
     {
         private const string ApiTypeName = "ErenshorCampmaster.CampmasterApi";
         private const int MinimumSchemaVersion = 2;
-        private readonly ManualLogSource _log;
+        private readonly IDeepSimsLog _log;
         private bool _resolved;
         private DateTime _nextResolveUtc = DateTime.MinValue;
         private bool _healthy;
@@ -26,7 +25,7 @@ namespace ErenshorDeepSims
         private long _lastSequence;
         private DateTime _nextPollUtc = DateTime.MinValue;
 
-        internal CampmasterCompatibility(ManualLogSource log)
+        internal CampmasterCompatibility(IDeepSimsLog log)
         {
             _log = log;
         }

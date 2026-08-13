@@ -4,7 +4,7 @@ using UnityEngine;
 
 namespace ErenshorDeepSims
 {
-    // These hooks mirror stable event points already used by other open-source Erenshor BepInEx mods.
+    // These hooks mirror stable event points already used by other open-source Erenshor mods.
     // They observe player events only; Erenshor still owns all gameplay decisions and execution.
 
     // Erenshor's player object is looked up by name, which is far too expensive to repeat inside a

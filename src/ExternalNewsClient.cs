@@ -1,4 +1,3 @@
-using BepInEx.Logging;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -49,7 +48,7 @@ namespace ErenshorDeepSims
         Gdelt
     }
 
-    // One provider attempt, kept for /dsxnews diagnostics and BepInEx debug logging. Never carries
+    // One provider attempt, kept for /dsxnews diagnostics and framework debug logging. Never carries
     // an API key or raw response body - just enough to explain what happened.
     internal sealed class NewsProviderAttempt
     {
@@ -65,24 +64,24 @@ namespace ErenshorDeepSims
     {
         private const string GdeltEndpoint = "https://api.gdeltproject.org/api/v2/doc/doc";
         private const string RssEndpoint = "https://news.google.com/rss/search";
-        private const string UserAgent = "ErenshorDeepSims/0.7.0 (+local BepInEx mod)";
+        private const string UserAgent = "ErenshorDeepSims/0.7.1 (+local Lunaris mod)";
 
         // Repeated identical failures (provider outage) should not each pay the full lookup budget.
         private const int NegativeCacheSeconds = 45;
         private const int MinProviderBudgetMs = 1200;
 
-        private readonly ManualLogSource _log;
+        private readonly IDeepSimsLog _log;
         private readonly INewsTransport _transport;
         private readonly object _cacheLock = new object();
         private readonly Dictionary<string, CachedBundle> _cache = new Dictionary<string, CachedBundle>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, DateTime> _negativeCache = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
 
-        internal ExternalNewsClient(ManualLogSource log) : this(log, new HttpWebRequestTransport()) { }
+        internal ExternalNewsClient(IDeepSimsLog log) : this(log, new HttpWebRequestTransport()) { }
 
         // Test seam: production always uses HttpWebRequestTransport; deterministic tests inject a
         // fake INewsTransport so provider-fallback behavior can be verified without real internet
         // access (see DeterministicRegressionTests.RunExternalNewsProviderTests).
-        internal ExternalNewsClient(ManualLogSource log, INewsTransport transport)
+        internal ExternalNewsClient(IDeepSimsLog log, INewsTransport transport)
         {
             _log = log;
             _transport = transport ?? new HttpWebRequestTransport();

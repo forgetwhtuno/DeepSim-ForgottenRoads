@@ -1,4 +1,3 @@
-using BepInEx.Logging;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -10,7 +9,7 @@ namespace ErenshorDeepSims
     internal class MemoryStore
     {
         private readonly string _directory;
-        private readonly ManualLogSource _log;
+        private readonly IDeepSimsLog _log;
         private readonly object _ioLock = new object();
         private readonly Dictionary<string, SimMemory> _cache = new Dictionary<string, SimMemory>(StringComparer.OrdinalIgnoreCase);
 
@@ -35,7 +34,7 @@ namespace ErenshorDeepSims
         private const int MaxPendingWrites = 32;
         private const int NormalFlushBatch = 16;
 
-        internal MemoryStore(string directory, ManualLogSource log, Func<SimMemory, bool> writeAttemptGate = null)
+        internal MemoryStore(string directory, IDeepSimsLog log, Func<SimMemory, bool> writeAttemptGate = null)
         {
             _directory = directory;
             _log = log;

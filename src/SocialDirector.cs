@@ -1,5 +1,3 @@
-using BepInEx.Configuration;
-using BepInEx.Logging;
 using System;
 using System.Collections.Generic;
 
@@ -8,14 +6,14 @@ namespace ErenshorDeepSims
     internal class SocialDirector
     {
         private readonly DeepSimsPlugin _plugin;
-        private readonly ManualLogSource _log;
+        private readonly IDeepSimsLog _log;
         private readonly EventConversationDirector _eventConversations;
         private readonly System.Random _random = new System.Random();
         private readonly Dictionary<string, DateTime> _lastEventUtc = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, int> _lastSimLevels = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         private readonly SemanticEventDeduplicator _semanticEvents = new SemanticEventDeduplicator();
         private readonly CampmasterCompatibility _campmaster;
-        private readonly ConfigEntry<bool> _verboseLogging;
+        private readonly DeepSimsConfigEntry<bool> _verboseLogging;
         private HashSet<string> _lastNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private string _lastScene = string.Empty;
         private int _lastPlayerLevel;
@@ -54,14 +52,13 @@ namespace ErenshorDeepSims
         private double _adaptiveScore;
         private string _adaptiveReason = "not evaluated";
 
-        internal SocialDirector(DeepSimsPlugin plugin, ManualLogSource log)
+        internal SocialDirector(DeepSimsPlugin plugin, IDeepSimsLog log)
         {
             _plugin = plugin;
             _log = log;
             _eventConversations = new EventConversationDirector(plugin);
             _campmaster = new CampmasterCompatibility(log);
-            _verboseLogging = plugin == null ? null : plugin.Config.Bind("Diagnostics", "VerboseLogging", false,
-                "Enable high-volume Deep Sims social-routing diagnostics. Warnings, errors, grounding rejections, and explicit diagnostic commands remain visible regardless.");
+            _verboseLogging = plugin == null ? null : plugin.VerboseLoggingConfig;
             _topicFatigue = new TopicFatigueTracker(
                 plugin == null || plugin.SeedFatigueSecondsConfig == null ? 300.0 : plugin.SeedFatigueSecondsConfig.Value,
                 plugin == null || plugin.SeedRecentTopicWindowMinutesConfig == null

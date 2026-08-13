@@ -1,4 +1,3 @@
-using BepInEx.Logging;
 using System;
 using System.Collections.Generic;
 
@@ -6,7 +5,7 @@ namespace ErenshorDeepSims
 {
     internal class DeepSlotManager
     {
-        private readonly ManualLogSource _log;
+        private readonly IDeepSimsLog _log;
         private readonly MemoryStore _memory;
         private readonly List<string> _activeNames = new List<string>();
         private readonly Dictionary<string, SimSnapshot> _snapshots = new Dictionary<string, SimSnapshot>(StringComparer.OrdinalIgnoreCase);
@@ -17,7 +16,7 @@ namespace ErenshorDeepSims
         // the same party-refresh batch. Not read by any gameplay logic.
         internal int LastJoinedCount { get; private set; }
 
-        internal DeepSlotManager(MemoryStore memory, ManualLogSource log)
+        internal DeepSlotManager(MemoryStore memory, IDeepSimsLog log)
         {
             _memory = memory;
             _log = log;

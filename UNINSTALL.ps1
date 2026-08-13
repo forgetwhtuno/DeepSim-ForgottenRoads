@@ -1,18 +1,35 @@
-param([string]$BepInExRoot = "")
-$ErrorActionPreference = "Stop"
-if (-not $BepInExRoot) {
-    $BepInExRoot = Read-Host "Paste the r2modman/Thunderstore profile folder that contains BepInEx"
-}
-$core = Join-Path $BepInExRoot "BepInEx\core\BepInEx.dll"
-if (-not (Test-Path $core)) { throw "The selected folder is not a BepInEx root: $BepInExRoot" }
-$plugins = @(
-    @{ Name = "DeepSims"; Path = (Join-Path $BepInExRoot "BepInEx\plugins\DeepSims") }
-    @{ Name = "Erenshor PvP"; Path = (Join-Path $BepInExRoot "BepInEx\plugins\ErenshorPvP") }
+param(
+    [string]$GameDir = "",
+    [switch]$RemoveData
 )
-foreach ($entry in $plugins) {
-    if (Test-Path $entry.Path) {
-        Remove-Item -LiteralPath $entry.Path -Recurse -Force
-        Write-Host "Removed $($entry.Name) plugin."
-    }
+
+$ErrorActionPreference = "Stop"
+
+function Resolve-Erenshor {
+    param([string]$Explicit)
+    if ($Explicit -and (Test-Path (Join-Path $Explicit "Erenshor.exe"))) { return (Resolve-Path $Explicit).Path }
+    $manual = Read-Host "Paste the Erenshor folder containing Erenshor.exe"
+    if ($manual -and (Test-Path (Join-Path $manual "Erenshor.exe"))) { return (Resolve-Path $manual).Path }
+    throw "Erenshor installation not found."
 }
-Write-Host "Memory/config under BepInEx\config\DeepSims was intentionally kept. Delete that folder too if you want a full reset."
+
+$GameDir = Resolve-Erenshor $GameDir
+$Plugin = Join-Path $GameDir "plugins\ErenshorDeepSims.dll"
+$Config = Join-Path $GameDir "plugins\config\erenshordeepsims.lpcfg"
+$Data = Join-Path $GameDir "plugins\config\DeepSims"
+
+if (Test-Path $Plugin) {
+    Remove-Item -LiteralPath $Plugin -Force
+    Write-Host "Removed plugin: $Plugin" -ForegroundColor Green
+} else {
+    Write-Host "Plugin DLL was not present: $Plugin" -ForegroundColor DarkGray
+}
+
+if ($RemoveData) {
+    if (Test-Path $Config) { Remove-Item -LiteralPath $Config -Force; Write-Host "Removed config: $Config" }
+    if (Test-Path $Data) { Remove-Item -LiteralPath $Data -Recurse -Force; Write-Host "Removed Deep Sims sidecar data: $Data" }
+    Write-Host "Erenshor save files were not touched." -ForegroundColor Yellow
+} else {
+    Write-Host "Deep Sims config and memory were preserved." -ForegroundColor Cyan
+    Write-Host "Run again with -RemoveData only if you intentionally want to delete Deep Sims-owned config/memory."
+}

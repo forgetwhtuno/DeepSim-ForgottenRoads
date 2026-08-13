@@ -1,4 +1,3 @@
-using BepInEx.Logging;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -13,12 +12,12 @@ namespace ErenshorDeepSims
     // public ISteamNews GetNewsForApp endpoint for Erenshor's app id; it is not a general web search.
     internal sealed class OfficialNewsClient
     {
-        private readonly ManualLogSource _log;
+        private readonly IDeepSimsLog _log;
         private readonly object _cacheLock = new object();
         private DateTime _cachedUtc = DateTime.MinValue;
         private string _cachedRaw = string.Empty;
 
-        internal OfficialNewsClient(ManualLogSource log) { _log = log; }
+        internal OfficialNewsClient(IDeepSimsLog log) { _log = log; }
 
         internal Task<WikiResult> SearchAsync(string endpoint, string query, int timeoutSeconds, int maxChars)
         {
@@ -80,7 +79,7 @@ namespace ErenshorDeepSims
             request.Method = "GET";
             request.Timeout = timeoutMs;
             request.ReadWriteTimeout = timeoutMs;
-            request.UserAgent = "ErenshorDeepSims/0.7.0 (+local BepInEx mod)";
+            request.UserAgent = "ErenshorDeepSims/0.7.1 (+local Lunaris mod)";
             request.Accept = "application/json";
             try
             {

@@ -23,12 +23,19 @@ namespace ErenshorDeepSims
         public const string PluginVersion = "0.7.1";
 
         internal static DeepSimsPlugin Instance;
+        private static int _instanceSerialCounter;
+        private int _instanceSerial;
+        private float _nextInstanceDiagnosticAt;
+        private string _characterScopeKey = CharacterScopeKey.Unscoped;
+        private bool _characterScopeReady;
+        private int _characterScopeGeneration;
 
         private IDeepSimsLog _log = NullDeepSimsLog.Instance;
         private DeepSimsSettings _settings;
         private IDeepSimsLog Logger { get { return _log ?? NullDeepSimsLog.Instance; } }
 
         private Harmony _harmony;
+        private DeepSimsSuiteAuraProvider _auraProvider;
         private readonly ConcurrentQueue<Action> _mainThreadActions = new ConcurrentQueue<Action>();
         private readonly SemaphoreSlim _inferenceGate = new SemaphoreSlim(1, 1);
         // _requestQueueLock owns all pending work below. Unity's main thread only enqueues immutable
@@ -336,13 +343,19 @@ namespace ErenshorDeepSims
 
         private void Awake()
         {
+            _instanceSerial = Interlocked.Increment(ref _instanceSerialCounter);
+            DeepSimsPlugin previousInstance = Instance;
             Instance = this;
             _log = new LunarisDeepSimsLog(Logging);
+            Logger.LogInfo("[DeepSimsInstanceDiag] lifecycle=Awake serial=" + _instanceSerial +
+                " unityId=" + GetInstanceID() + " previousInstancePresent=" + (previousInstance != null));
             _settings = new DeepSimsSettings();
             Config.Register(ref _settings);
             InitializeConfigEntries();
             SyncSocialPerspectiveFromConfig();
             DeepSimsPaths.EnsureDataDirectories(Logger);
+            if (DeepSimsPaths.HasLegacyGlobalMemory())
+                Logger.LogWarning("Legacy unscoped Deep Sims memory was preserved under Memory/*.json but is not auto-assigned to any player character. New social history is stored under Memory/Characters/<character-key> to prevent cross-character leakage.");
             bool configChanged = false;
 
             // Always-on sanitization of values that are simply invalid rather than merely outdated.
@@ -404,11 +417,6 @@ namespace ErenshorDeepSims
             }
             if (configChanged) Config.Save();
 
-            string memoryDir = DeepSimsPaths.MemoryDirectory;
-            Directory.CreateDirectory(memoryDir);
-            _memory = new MemoryStore(memoryDir, Logger);
-            _slots = new DeepSlotManager(_memory, Logger);
-            _slots.SetManualSlots(ManualSlotsConfig.Value);
             _ollama = new OllamaClient(Logger);
             _wiki = new WikiClient(Logger);
             _news = new OfficialNewsClient(Logger);
@@ -417,27 +425,52 @@ namespace ErenshorDeepSims
             _socialBudget = new SocialBudget();
             _socialBudget.SetPreset(EffectiveSocialActivityPreset());
             _director = new SocialDirector(this, Logger);
-            _telemetry = new SessionTelemetry(this, _memory);
+
+            _characterScopeReady = DeepSimsCharacterIdentity.IsLocalCharacterReady();
+            _characterScopeKey = _characterScopeReady ? DeepSimsCharacterIdentity.ResolveCharacterKey() : CharacterScopeKey.Unscoped;
+            InitializeCharacterScopedRuntime(_characterScopeKey);
             _perfWarmupUntil = Time.realtimeSinceStartup + 5f;
 
             _harmony = new Harmony(PluginGuid);
             _harmony.PatchAll(typeof(DeepSimsPlugin).Assembly);
+
+            // Optional Suite Hub transport. No Hub dependency: registering Aura funcs is a no-op
+            // until something actually subscribes, and no assumption is made that Hub exists.
+            try
+            {
+                _auraProvider = new DeepSimsSuiteAuraProvider(this);
+                _auraProvider.Register();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning("Suite Hub Aura provider registration failed: " + DiagnosticPrivacy.ExceptionType(ex));
+            }
+
             Logger.LogInfo(PluginName + " " + PluginVersion + " loaded. Whole-party Deep Sim enhancement enabled (hard cap 5).");
         }
 
         private bool EnqueueMainThread(Action action)
         {
             if (action == null) return false;
+            int characterGeneration = Volatile.Read(ref _characterScopeGeneration);
             lock (_requestQueueLock)
             {
                 if (_requestStopping) return false;
-                _mainThreadActions.Enqueue(action);
+                _mainThreadActions.Enqueue(delegate
+                {
+                    // Character A's late model/network callback must never become visible or persist
+                    // social state after the user has switched to character B.
+                    if (characterGeneration != Volatile.Read(ref _characterScopeGeneration)) return;
+                    action();
+                });
                 return true;
             }
         }
 
         private void OnDestroy()
         {
+            Logger.LogInfo("[DeepSimsInstanceDiag] lifecycle=OnDestroy serial=" + _instanceSerial +
+                " unityId=" + GetInstanceID() + " instanceMatches=" + ReferenceEquals(Instance, this));
             // Lunaris can unload/reload plugins while Erenshor is running. Stop admission first so
             // no worker can queue new UI/chat work after teardown begins.
             lock (_requestQueueLock)
@@ -451,6 +484,11 @@ namespace ErenshorDeepSims
             try { AdvanceConversationGeneration(true); } catch { }
             try { if (_groupMessages != null) _groupMessages.Clear(); } catch { }
 
+            // Unregister every Suite Hub Aura function before further teardown so a Hub polling on
+            // another thread can never invoke a setting/action against a half-destroyed instance.
+            try { if (_auraProvider != null) _auraProvider.Unregister(); } catch { }
+            _auraProvider = null;
+
             // Release queued closures immediately. Late workers use EnqueueMainThread(), which shares
             // _requestQueueLock and therefore fails closed once _requestStopping is set.
             try
@@ -459,6 +497,14 @@ namespace ErenshorDeepSims
                 while (_mainThreadActions.TryDequeue(out ignored)) { }
             }
             catch { }
+
+            // Clear mod-owned static runtime state before a future Lunaris reload can reactivate it.
+            // This never touches standalone companion gameplay state; it only resets Deep Sims' own
+            // legacy follow target and social integration bookkeeping.
+            try { FollowController.Stop(); } catch { }
+            try { DuelSocialIntegration.ResetRuntimeState(); } catch { }
+            try { PvpEventBridge.ResetRuntimeState(); } catch { }
+            try { NemesisEventBridge.ResetRuntimeState(); } catch { }
 
             // Finish/flush only mod-owned sidecar state. Never touch Erenshor save files here.
             try { if (_telemetry != null) _telemetry.FinishNow(); } catch { }
@@ -481,6 +527,101 @@ namespace ErenshorDeepSims
             RoleplayFactionContext.Clear();
             RoleplayClassContext.Clear();
             if (ReferenceEquals(Instance, this)) Instance = null;
+        }
+
+        private void InitializeCharacterScopedRuntime(string characterKey)
+        {
+            string key = string.IsNullOrWhiteSpace(characterKey) ? CharacterScopeKey.Unscoped : characterKey;
+            string memoryDir = DeepSimsPaths.CharacterMemoryDirectory(key);
+            Directory.CreateDirectory(memoryDir);
+            _memory = new MemoryStore(memoryDir, Logger);
+            _slots = new DeepSlotManager(_memory, Logger);
+            _slots.SetManualSlots(ManualSlotsConfig == null ? string.Empty : ManualSlotsConfig.Value);
+            _telemetry = new SessionTelemetry(this, _memory);
+        }
+
+        private void EnsureCharacterScope()
+        {
+            bool ready = DeepSimsCharacterIdentity.IsLocalCharacterReady();
+            if (ready)
+            {
+                string resolved = DeepSimsCharacterIdentity.ResolveCharacterKey();
+                if (!_characterScopeReady || !string.Equals(resolved, _characterScopeKey, StringComparison.Ordinal))
+                    SwitchCharacterScope(resolved, true);
+                return;
+            }
+
+            // A player object can disappear briefly during an ordinary zone load. Do not treat that
+            // as a character change. Character-select is the verified boundary where the old scope
+            // must be released before another save can become active.
+            if (_characterScopeReady && DeepSimsCharacterIdentity.IsCharacterSelectActive())
+                SwitchCharacterScope(CharacterScopeKey.Unscoped, false);
+        }
+
+        private void SwitchCharacterScope(string nextKey, bool ready)
+        {
+            string safeNext = string.IsNullOrWhiteSpace(nextKey) ? CharacterScopeKey.Unscoped : nextKey;
+            if (_characterScopeReady == ready && string.Equals(_characterScopeKey, safeNext, StringComparison.Ordinal)) return;
+
+            // Invalidate every delayed/background presentation path before replacing the memory store.
+            Interlocked.Increment(ref _characterScopeGeneration);
+            lock (_requestQueueLock)
+            {
+                _pendingPartyWork = null;
+                _pendingWhisperWork.Clear();
+                _pendingAutonomousWork = null;
+                _whisperGenerations.Clear();
+            }
+            try { AdvanceConversationGeneration(true); } catch { }
+            try { if (_groupMessages != null) _groupMessages.Clear(); } catch { }
+            try
+            {
+                Action ignored;
+                while (_mainThreadActions.TryDequeue(out ignored)) { }
+            }
+            catch { }
+            lock (_partyConversationLock)
+            {
+                _partyConversation.Clear();
+                _lastPartyConversationUtc = DateTime.MinValue;
+            }
+            lock (_recentAiLock)
+            {
+                _recentAiLines.Clear();
+                _recentAiLineUtc.Clear();
+            }
+
+            try { if (_telemetry != null) _telemetry.FinishNow(); } catch { }
+            try { if (_memory != null) _memory.Shutdown(); } catch { }
+
+            _characterScopeKey = safeNext;
+            _characterScopeReady = ready;
+            InitializeCharacterScopedRuntime(_characterScopeKey);
+
+            // Social cadence and conversational callbacks are player-character context too. Start a
+            // fresh bounded director/budget instead of carrying character A's recent speech into B.
+            _socialBudget = new SocialBudget();
+            _socialBudget.SetPreset(SocialPolicy.ParsePreset(SocialActivityPresetConfig == null ? "Normal" : SocialActivityPresetConfig.Value));
+            _director = new SocialDirector(this, Logger);
+            _lastExternalNews = null;
+            _lastExternalNewsUtc = DateTime.MinValue;
+            _lastScene = string.Empty;
+            _nextPartyRefresh = 0f;
+            RoleplayFactionContext.Clear();
+            RoleplayClassContext.Clear();
+            SetResponseStatus("idle", ready ? "character scope ready" : "waiting for character");
+            Logger.LogInfo("[DeepSims CharacterScope] state=" + (ready ? "ready" : "unscoped") +
+                " generation=" + Volatile.Read(ref _characterScopeGeneration));
+        }
+
+        private void EmitInstanceDiagnosticIfDue()
+        {
+            float now = Time.realtimeSinceStartup;
+            if (now < _nextInstanceDiagnosticAt) return;
+            _nextInstanceDiagnosticAt = now + 30f;
+            Logger.LogDebug("[DeepSimsInstanceDiag] lifecycle=Heartbeat serial=" + _instanceSerial +
+                " unityId=" + GetInstanceID() + " instanceMatches=" + ReferenceEquals(Instance, this) +
+                " characterScope=" + (_characterScopeReady ? "ready" : "unscoped") + " requestPump=" + _requestPumpRunning);
         }
 
         private void SyncSocialPerspectiveFromConfig()
@@ -507,12 +648,14 @@ namespace ErenshorDeepSims
             {
                 SyncSocialPerspectiveFromConfig();
                 ObserveFramePerformance();
+                EnsureCharacterScope();
+                EmitInstanceDiagnosticIfDue();
 
                 Action action;
                 while (_mainThreadActions.TryDequeue(out action))
                 {
                     try { action(); }
-                    catch (Exception ex) { Logger.LogError("DeepSims main-thread action failed: " + ex); }
+                    catch (Exception ex) { Logger.LogError("DeepSims main-thread action failed: " + DiagnosticPrivacy.ExceptionType(ex)); }
                 }
 
                 FlushScheduledGroupMessages();
@@ -526,7 +669,7 @@ namespace ErenshorDeepSims
             }
             catch (Exception ex)
             {
-                Logger.LogWarning("DeepSims Update() failed: " + ex.Message);
+                Logger.LogWarning("DeepSims Update() failed: " + DiagnosticPrivacy.ExceptionType(ex));
             }
         }
 
@@ -539,6 +682,7 @@ namespace ErenshorDeepSims
 
         internal void RefreshSlots()
         {
+            EnsureCharacterScope();
             Stopwatch refreshWatch = Stopwatch.StartNew();
             double slotsMs = 0, telemetryMs = 0, directorMs = 0, campMs = 0;
             int joinedCount = 0;
@@ -575,7 +719,7 @@ namespace ErenshorDeepSims
                 ProcessCampmasterEvents();
                 campMs = stage.Elapsed.TotalMilliseconds;
             }
-            catch (Exception ex) { Logger.LogWarning("Party refresh failed: " + ex.Message); }
+            catch (Exception ex) { Logger.LogWarning("Party refresh failed: " + DiagnosticPrivacy.ExceptionType(ex)); }
             finally
             {
                 refreshWatch.Stop();
@@ -1163,7 +1307,7 @@ namespace ErenshorDeepSims
                     reply = TextSanitizer.CleanReply(reply, requestSim.Name, world != null && world.Player != null ? world.Player.Name : null, Math.Max(80, MaxReplyCharactersConfig.Value));
                     if (GroundingGuard.HasInstructionLeak(reply))
                     {
-                        Logger.LogWarning("Rejected prompt/instruction leak in private reply from " + requestSim.Name + ": " + reply);
+                        Logger.LogWarning("Rejected prompt/instruction leak in private reply from " + requestSim.Name + "; content omitted.");
                         messages.Add(new ChatMessage("user", "Your previous draft repeated hidden instruction/context text. Return ONLY the short in-character chat answer to the player. Do not quote, summarize, or mention instructions, prompts, verified sections, allowed topics, or Deep Sims."));
                         string leakRetry = await TimedChatAsync(messages);
                         if (stale()) return;
@@ -1179,7 +1323,8 @@ namespace ErenshorDeepSims
                     if (stale()) return;
                     bool whisperUsedTemplate = IsNoMessage(reply);
                     if (whisperUsedTemplate) reply = wiki != null ? RenderUnknownFactReplyForPerspective(userMessage, requestSim) : GroundingGuard.SafePrivateFallback(userMessage);
-                    if (string.IsNullOrWhiteSpace(reply)) reply = "...think my chat ate that.";
+                    if (string.IsNullOrWhiteSpace(reply))
+                        reply = SocialPerspectiveState.RoleplayActive ? "Lost my thought there." : "...think my chat ate that.";
                     string rawReply = reply;
 
                     EnqueueMainThread(delegate
@@ -1205,7 +1350,7 @@ namespace ErenshorDeepSims
                             bool leakFallback = false;
                             if (GroundingGuard.HasInstructionLeak(shown))
                             {
-                                Logger.LogWarning("Blocked prompt/instruction leak at private-chat output boundary from " + fresh.Name + ": " + shown);
+                                Logger.LogWarning("Blocked prompt/instruction leak at private-chat output boundary from " + fresh.Name + "; content omitted.");
                                 shown = wiki != null ? RenderUnknownFactReplyForPerspective(userMessage, fresh) : GroundingGuard.SafePrivateFallback(userMessage);
                                 leakFallback = true;
                             }
@@ -1214,23 +1359,40 @@ namespace ErenshorDeepSims
                             // from the LLM's first draft or from native typing personalization.
                             bool whisperGuardRan, whisperGuardChanged, whisperGuardRejected;
                             shown = ApplyRoleplayOutputGuard(shown, fresh.Name, out whisperGuardRan, out whisperGuardChanged, out whisperGuardRejected);
+                            string whisperFallbackReason = string.Empty;
                             if (whisperGuardRejected)
                             {
+                                whisperFallbackReason = "roleplay_guard_rejected";
                                 shown = wiki != null ? RenderUnknownFactReplyForPerspective(userMessage, fresh) : GroundingGuard.SafePrivateFallback(userMessage);
                                 leakFallback = true;
+
+                                // The replacement is a NEW final candidate. Do not assume a fallback is
+                                // safe by convention: run the exact same Roleplay boundary again so the
+                                // literal text being stored/displayed has itself passed validation.
+                                bool fallbackGuardRan, fallbackGuardChanged, fallbackGuardRejected;
+                                shown = ApplyRoleplayOutputGuard(shown, fresh.Name, out fallbackGuardRan, out fallbackGuardChanged, out fallbackGuardRejected);
+                                whisperGuardRan = whisperGuardRan || fallbackGuardRan;
+                                whisperGuardChanged = whisperGuardChanged || fallbackGuardChanged;
+                                whisperGuardRejected = fallbackGuardRejected;
                             }
-                            LogRoleplayDiagnostic("whisper", fresh.Name, whisperUsedTemplate || leakFallback, whisperGuardRan, whisperGuardChanged, whisperGuardRejected);
+                            if (whisperGuardRejected || IsNoMessage(shown) || string.IsNullOrWhiteSpace(shown))
+                            {
+                                LogRoleplayDiagnostic("whisper", fresh.Name, whisperUsedTemplate || leakFallback, whisperGuardRan, whisperGuardChanged, whisperGuardRejected,
+                                    PartyReplyIntentClassifier.Classify(userMessage).ToString(), fresh.ClassName, wiki != null, 0, "suppressed", whisperFallbackReason);
+                                return;
+                            }
+                            LogRoleplayDiagnostic("whisper", fresh.Name, whisperUsedTemplate || leakFallback, whisperGuardRan, whisperGuardChanged, whisperGuardRejected,
+                                PartyReplyIntentClassifier.Classify(userMessage).ToString(), fresh.ClassName, wiki != null, 0, "accepted", whisperFallbackReason);
                             _memory.AddConversation(fresh, userMessage, shown, Math.Max(4, MaxHistoryMessagesConfig.Value));
                             WriteChat(fresh.Name + " tells you: " + shown, GetNativeIncomingWhisperColor());
                         }
-                        catch (Exception ex) { Logger.LogError("Could not display/store DeepSim reply: " + ex); }
+                        catch (Exception ex) { Logger.LogError("Could not display/store DeepSim reply: " + DiagnosticPrivacy.ExceptionType(ex)); }
                     });
                 }
                 catch (Exception ex)
                 {
-                    Logger.LogError("LLM reply failed for " + requestSim.Name + ": " + ex);
-                    string shortError = ex.Message == null ? "unknown error" : ex.Message;
-                    if (shortError.Length > 150) shortError = shortError.Substring(0, 150) + "...";
+                    Logger.LogError("LLM reply failed for " + requestSim.Name + ": " + DiagnosticPrivacy.ExceptionType(ex));
+                    string shortError = DiagnosticPrivacy.ExceptionType(ex);
                     if (!stale()) EnqueueMainThread(delegate { WriteChat("[DeepSims] " + requestSim.Name + " could not reply: " + shortError, "red"); });
                 }
                 finally { _inferenceGate.Release(); }
@@ -1415,7 +1577,7 @@ namespace ErenshorDeepSims
                     if (safe) finalLine = generated;
                     else Logger.LogDebug("Nemesis LLM line rejected; using template fallback.");
                 }
-                catch (Exception ex) { Logger.LogDebug("Nemesis LLM voice unavailable; using template fallback: " + ex.Message); }
+                catch (Exception ex) { Logger.LogDebug("Nemesis LLM voice unavailable; using template fallback: " + DiagnosticPrivacy.ExceptionType(ex)); }
                 finally
                 {
                     if (gateHeld) _inferenceGate.Release();
@@ -1504,6 +1666,322 @@ namespace ErenshorDeepSims
             if (!enable) { RoleplayFactionContext.Clear(); RoleplayClassContext.Clear(); }
             WriteChat("[DeepSims Roleplay] Perspective set to " + SocialPerspective.Describe(mode) +
                 (enable ? ". Sims now speak as the adventurers they represent." : ". Sims speak as MMO players again."), "yellow");
+        }
+
+        internal Dictionary<string, string> BuildControlStatusSnapshot(int schemaVersion)
+        {
+            Dictionary<string, string> data = new Dictionary<string, string>(StringComparer.Ordinal);
+            data["schemaVersion"] = schemaVersion.ToString();
+            data["source"] = "ErenshorDeepSims";
+            data["available"] = "true";
+            data["module"] = PluginName;
+            data["version"] = PluginVersion;
+            data["enabled"] = EnabledConfig != null && EnabledConfig.Value ? "true" : "false";
+            data["model"] = DeepSimsControlPolicy.SafePublicModelLabel(
+                ModelConfig == null ? null : ModelConfig.Value);
+            // Hub/control wire choices are explicit normalized strings. Never round-trip through
+            // enum.ToString(): SocialExpressionMode declares Llm while the supported stored/public
+            // wire value is LLM, and ordinal Hub validation intentionally rejects casing drift.
+            data["socialMode"] = DeepSimsControlPolicy.SocialModeOrDefault(
+                SocialExpressionModeConfig == null ? null : SocialExpressionModeConfig.Value);
+            data["activity"] = DeepSimsControlPolicy.ActivityOrDefault(
+                SocialActivityPresetConfig == null ? null : SocialActivityPresetConfig.Value);
+            data["perspective"] = DeepSimsControlPolicy.PerspectiveOrDefault(
+                SocialPerspectiveConfig == null ? null : SocialPerspectiveConfig.Value);
+            data["characterScope"] = _characterScopeReady ? "ready" : "unresolved";
+            data["memoryWriter"] = _memory != null && _memory.WriterAlive ? "healthy" : "unavailable";
+            data["instanceSerial"] = _instanceSerial.ToString();
+            data["instanceCurrent"] = ReferenceEquals(Instance, this) ? "true" : "false";
+
+            string responseStatus;
+            lock (_responseStatusLock) responseStatus = _responseStatus;
+            // The Hub gets only a coarse status category. _responseStatusDetail can contain a
+            // speaker name, lookup term, provider error, or other conversation-adjacent diagnostic
+            // text and therefore stays inside Deep Sims rather than becoming a cross-mod API value.
+            data["ollamaStatus"] = _ollamaUnavailableUntilUtc > DateTime.UtcNow ? "cooldown" : (_aiRequestActive ? "request-active" : responseStatus);
+
+            List<SimSnapshot> active = _slots == null ? new List<SimSnapshot>() : _slots.GetActiveSnapshots();
+            List<string> party = new List<string>();
+            for (int i = 0; i < active.Count; i++)
+            {
+                SimSnapshot sim = active[i];
+                if (sim == null || string.IsNullOrWhiteSpace(sim.Name)) continue;
+                string identity = sim.Name;
+                if (!string.IsNullOrWhiteSpace(sim.ClassName)) identity += " (" + sim.ClassName + ")";
+                party.Add(identity);
+            }
+            data["deepSimCount"] = party.Count.ToString();
+            if (party.Count > 0) data["deepSims"] = string.Join(", ", party.ToArray());
+
+            if (_telemetry != null)
+            {
+                OutingSnapshot outing = _telemetry.Snapshot();
+                if (outing != null)
+                {
+                    data["sessionActivity"] = string.IsNullOrWhiteSpace(outing.Activity) ? "idle" : outing.Activity;
+                    data["sessionKills"] = outing.TotalKills.ToString();
+                    data["sessionLoot"] = outing.TotalLootItems.ToString();
+                    if (!string.IsNullOrWhiteSpace(outing.ZoneHistory)) data["sessionZones"] = outing.ZoneHistory;
+                }
+            }
+            return data;
+        }
+
+        internal Dictionary<string, string> BuildControlSettingsSnapshot()
+        {
+            // All fields here are deliberately allowlisted. Keep endpoint URLs, API keys, model
+            // paths, raw memories, prompts and conversation history out of this cross-mod surface.
+            Dictionary<string, string> data = new Dictionary<string, string>(StringComparer.Ordinal);
+            data["perspective"] = DeepSimsControlPolicy.PerspectiveOrDefault(
+                SocialPerspectiveConfig == null ? null : SocialPerspectiveConfig.Value);
+            data["socialMode"] = DeepSimsControlPolicy.SocialModeOrDefault(
+                SocialExpressionModeConfig == null ? null : SocialExpressionModeConfig.Value);
+            data["activity"] = DeepSimsControlPolicy.ActivityOrDefault(
+                SocialActivityPresetConfig == null ? null : SocialActivityPresetConfig.Value);
+            data["autonomousSocial"] = BoolWire(DirectorEnabledConfig != null && DirectorEnabledConfig.Value);
+            data["partyChatResponses"] = BoolWire(PartyChatResponsesConfig != null && PartyChatResponsesConfig.Value);
+
+            data["wholeParty"] = BoolWire(WholePartyDeepSimsConfig != null && WholePartyDeepSimsConfig.Value);
+            data["eventChatter"] = BoolWire(EventChatterConfig != null && EventChatterConfig.Value);
+            data["idleChatter"] = BoolWire(IdleChatterConfig != null && IdleChatterConfig.Value);
+            data["simToSim"] = BoolWire(SimToSimConfig != null && SimToSimConfig.Value);
+            data["conversationThreads"] = BoolWire(ConversationThreadsConfig != null && ConversationThreadsConfig.Value);
+            data["conversationSeeding"] = BoolWire(SeedingEnabledConfig != null && SeedingEnabledConfig.Value);
+            data["hybridWhispers"] = BoolWire(HybridWhispersConfig != null && HybridWhispersConfig.Value);
+            data["vanillaTyping"] = BoolWire(ApplyVanillaTypingConfig != null && ApplyVanillaTypingConfig.Value);
+            data["wikiLookup"] = BoolWire(WikiEnabledConfig != null && WikiEnabledConfig.Value);
+            data["officialNews"] = BoolWire(OfficialNewsEnabledConfig != null && OfficialNewsEnabledConfig.Value);
+            data["externalNews"] = BoolWire(ExternalNewsEnabledConfig != null && ExternalNewsEnabledConfig.Value);
+            data["externalNewsAuto"] = BoolWire(ExternalNewsAutoLookupConfig != null && ExternalNewsAutoLookupConfig.Value);
+            data["pauseAutonomousCombat"] = BoolWire(PauseAutonomousInCombatConfig != null && PauseAutonomousInCombatConfig.Value);
+            data["campmasterIntegration"] = BoolWire(CampmasterIntegrationConfig != null && CampmasterIntegrationConfig.Value);
+            data["inferenceMode"] = DeepSimsControlPolicy.InferenceModeOrDefault(
+                InferenceModeConfig == null ? null : InferenceModeConfig.Value);
+            data["reasoningMode"] = DeepSimsControlPolicy.ReasoningModeOrDefault(
+                ReasoningModeConfig == null ? null : ReasoningModeConfig.Value);
+
+            data["verboseLogging"] = BoolWire(VerboseLoggingConfig != null && VerboseLoggingConfig.Value);
+            data["seedDiagnostics"] = BoolWire(SeedDiagnosticsConfig != null && SeedDiagnosticsConfig.Value);
+            return data;
+        }
+
+        internal string BuildControlHubStatus()
+        {
+            string enabled = EnabledConfig != null && EnabledConfig.Value ? "Enabled" : "Disabled";
+            string ollama;
+            lock (_responseStatusLock) ollama = _responseStatus;
+            if (_ollamaUnavailableUntilUtc > DateTime.UtcNow) ollama = "cooldown";
+            else if (_aiRequestActive) ollama = "request-active";
+            ollama = DeepSimsControlPolicy.SafeResponseStatusCategory(ollama);
+            string perspective = DeepSimsControlPolicy.PerspectiveOrDefault(
+                SocialPerspectiveConfig == null ? null : SocialPerspectiveConfig.Value);
+            return enabled + " | " + perspective + " | Ollama " + ollama;
+        }
+
+        private static string BoolWire(bool value)
+        {
+            return value ? "true" : "false";
+        }
+
+        internal bool TrySetControlSetting(string settingId, string value, out string failure)
+        {
+            failure = null;
+            string id = settingId == null ? string.Empty : settingId.Trim();
+            string normalized;
+            if (!DeepSimsControlPolicy.TryNormalizeSettingValue(id, value, out normalized))
+            {
+                failure = DeepSimsControlPolicy.IsBoolSetting(id) ? "Expected true or false." : "Unknown or invalid setting value.";
+                return false;
+            }
+
+            if (string.Equals(id, "socialMode", StringComparison.OrdinalIgnoreCase))
+                return TrySetControlSocialMode(normalized, out failure);
+            if (string.Equals(id, "activity", StringComparison.OrdinalIgnoreCase))
+                return TrySetControlActivityPreset(normalized, out failure);
+            if (string.Equals(id, "perspective", StringComparison.OrdinalIgnoreCase))
+                return TrySetControlPerspective(normalized, out failure);
+            if (string.Equals(id, "inferenceMode", StringComparison.OrdinalIgnoreCase))
+                return TrySetControlInferenceMode(normalized, out failure);
+            if (string.Equals(id, "reasoningMode", StringComparison.OrdinalIgnoreCase))
+                return TrySetControlReasoningMode(normalized, out failure);
+
+            DeepSimsConfigEntry<bool> target = null;
+            if (string.Equals(id, "autonomousSocial", StringComparison.OrdinalIgnoreCase)) target = DirectorEnabledConfig;
+            else if (string.Equals(id, "partyChatResponses", StringComparison.OrdinalIgnoreCase)) target = PartyChatResponsesConfig;
+            else if (string.Equals(id, "wholeParty", StringComparison.OrdinalIgnoreCase)) target = WholePartyDeepSimsConfig;
+            else if (string.Equals(id, "eventChatter", StringComparison.OrdinalIgnoreCase)) target = EventChatterConfig;
+            else if (string.Equals(id, "idleChatter", StringComparison.OrdinalIgnoreCase)) target = IdleChatterConfig;
+            else if (string.Equals(id, "simToSim", StringComparison.OrdinalIgnoreCase)) target = SimToSimConfig;
+            else if (string.Equals(id, "conversationThreads", StringComparison.OrdinalIgnoreCase)) target = ConversationThreadsConfig;
+            else if (string.Equals(id, "conversationSeeding", StringComparison.OrdinalIgnoreCase)) target = SeedingEnabledConfig;
+            else if (string.Equals(id, "hybridWhispers", StringComparison.OrdinalIgnoreCase)) target = HybridWhispersConfig;
+            else if (string.Equals(id, "vanillaTyping", StringComparison.OrdinalIgnoreCase)) target = ApplyVanillaTypingConfig;
+            else if (string.Equals(id, "wikiLookup", StringComparison.OrdinalIgnoreCase)) target = WikiEnabledConfig;
+            else if (string.Equals(id, "officialNews", StringComparison.OrdinalIgnoreCase)) target = OfficialNewsEnabledConfig;
+            else if (string.Equals(id, "externalNews", StringComparison.OrdinalIgnoreCase)) target = ExternalNewsEnabledConfig;
+            else if (string.Equals(id, "externalNewsAuto", StringComparison.OrdinalIgnoreCase)) target = ExternalNewsAutoLookupConfig;
+            else if (string.Equals(id, "pauseAutonomousCombat", StringComparison.OrdinalIgnoreCase)) target = PauseAutonomousInCombatConfig;
+            else if (string.Equals(id, "campmasterIntegration", StringComparison.OrdinalIgnoreCase)) target = CampmasterIntegrationConfig;
+            else if (string.Equals(id, "verboseLogging", StringComparison.OrdinalIgnoreCase)) target = VerboseLoggingConfig;
+            else if (string.Equals(id, "seedDiagnostics", StringComparison.OrdinalIgnoreCase)) target = SeedDiagnosticsConfig;
+
+            if (target == null)
+            {
+                failure = "Unknown setting id.";
+                return false;
+            }
+
+            bool oldValue = target.Value;
+            target.Value = string.Equals(normalized, "true", StringComparison.Ordinal);
+            try { Config.Save(); }
+            catch (Exception ex)
+            {
+                target.Value = oldValue;
+                failure = "Could not save Deep Sims settings (" + DiagnosticPrivacy.ExceptionType(ex) + ").";
+                return false;
+            }
+            return true;
+        }
+
+        internal bool TrySetControlSocialMode(string mode, out string failure)
+        {
+            failure = null;
+            string normalized;
+            if (!DeepSimsControlPolicy.TryNormalizeSocialMode(mode, out normalized))
+            {
+                failure = "Expected Auto, LLM, Templates, or Off.";
+                return false;
+            }
+            string oldValue = SocialExpressionModeConfig.Value;
+            SocialExpressionModeConfig.Value = normalized;
+            try { Config.Save(); }
+            catch (Exception ex)
+            {
+                SocialExpressionModeConfig.Value = oldValue;
+                failure = "Could not save Deep Sims settings (" + DiagnosticPrivacy.ExceptionType(ex) + ").";
+                return false;
+            }
+            return true;
+        }
+
+        internal bool TrySetControlActivityPreset(string preset, out string failure)
+        {
+            failure = null;
+            string normalized;
+            if (!DeepSimsControlPolicy.TryNormalizeActivity(preset, out normalized))
+            {
+                failure = "Expected Adaptive, Quiet, Normal, or Lively.";
+                return false;
+            }
+            string oldValue = SocialActivityPresetConfig.Value;
+            SocialActivityPresetConfig.Value = normalized;
+            try { Config.Save(); }
+            catch (Exception ex)
+            {
+                SocialActivityPresetConfig.Value = oldValue;
+                failure = "Could not save Deep Sims settings (" + DiagnosticPrivacy.ExceptionType(ex) + ").";
+                return false;
+            }
+            if (_socialBudget != null) _socialBudget.SetPreset(EffectiveSocialActivityPreset());
+            return true;
+        }
+
+        internal bool TrySetControlPerspective(string perspective, out string failure)
+        {
+            failure = null;
+            string normalized;
+            if (!DeepSimsControlPolicy.TryNormalizePerspective(perspective, out normalized))
+            {
+                failure = "Expected MMO or Roleplay.";
+                return false;
+            }
+            bool roleplay = string.Equals(normalized, "Roleplay", StringComparison.Ordinal);
+            return TrySetControlRoleplay(roleplay, out failure);
+        }
+
+        internal bool TrySetControlInferenceMode(string mode, out string failure)
+        {
+            failure = null;
+            string normalized;
+            if (!DeepSimsControlPolicy.TryNormalizeInferenceMode(mode, out normalized))
+            {
+                failure = "Expected Auto, CPU, or GPU.";
+                return false;
+            }
+            string oldValue = InferenceModeConfig.Value;
+            InferenceModeConfig.Value = normalized;
+            try { Config.Save(); }
+            catch (Exception ex)
+            {
+                InferenceModeConfig.Value = oldValue;
+                failure = "Could not save Deep Sims settings (" + DiagnosticPrivacy.ExceptionType(ex) + ").";
+                return false;
+            }
+            return true;
+        }
+
+        internal bool TrySetControlReasoningMode(string mode, out string failure)
+        {
+            failure = null;
+            string normalized;
+            if (!DeepSimsControlPolicy.TryNormalizeReasoningMode(mode, out normalized))
+            {
+                failure = "Expected Off, Selective, or Always.";
+                return false;
+            }
+            string oldValue = ReasoningModeConfig.Value;
+            ReasoningModeConfig.Value = normalized;
+            try { Config.Save(); }
+            catch (Exception ex)
+            {
+                ReasoningModeConfig.Value = oldValue;
+                failure = "Could not save Deep Sims settings (" + DiagnosticPrivacy.ExceptionType(ex) + ").";
+                return false;
+            }
+            return true;
+        }
+
+        internal bool TrySetControlRoleplay(bool enabled, out string failure)
+        {
+            failure = null;
+            SocialPerspectiveMode oldMode = SocialPerspectiveState.Current;
+            string oldValue = SocialPerspectiveConfig.Value;
+            SocialPerspectiveMode mode = enabled ? SocialPerspectiveMode.Roleplay : SocialPerspectiveMode.Mmo;
+            SocialPerspectiveState.Current = mode;
+            SocialPerspectiveConfig.Value = SocialPerspective.Describe(mode);
+            try { Config.Save(); }
+            catch (Exception ex)
+            {
+                SocialPerspectiveState.Current = oldMode;
+                SocialPerspectiveConfig.Value = oldValue;
+                failure = "Could not save Deep Sims settings (" + DiagnosticPrivacy.ExceptionType(ex) + ").";
+                return false;
+            }
+            if (!enabled) { RoleplayFactionContext.Clear(); RoleplayClassContext.Clear(); }
+            return true;
+        }
+
+        internal bool TryRefreshControlStatus(out string failure)
+        {
+            failure = null;
+            if (_requestStopping) { failure = "Deep Sims is shutting down."; return false; }
+            try
+            {
+                EnsureCharacterScope();
+                if (!DeepSimsCharacterIdentity.IsLocalCharacterReady())
+                {
+                    failure = "No active local character is ready.";
+                    return false;
+                }
+                RefreshSlots();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning("Suite Hub status refresh failed: " + DiagnosticPrivacy.ExceptionType(ex));
+                failure = "Status refresh failed; check Deep Sims diagnostics.";
+                return false;
+            }
         }
 
         internal SocialActivityPreset EffectiveSocialActivityPreset()
@@ -1613,7 +2091,10 @@ namespace ErenshorDeepSims
             SimSnapshot speaker = SelectBestSpeaker(active, null, playerMessage, null);
             if (speaker == null) return false;
             string reply;
-            if (!SocialTemplates.TryRenderPlayerRitual(playerMessage, speaker, out reply)) return false;
+            bool rendered = SocialPerspectiveState.RoleplayActive
+                ? RoleplayTemplates.TryRenderPlayerRitual(playerMessage, speaker, out reply)
+                : SocialTemplates.TryRenderPlayerRitual(playerMessage, speaker, out reply);
+            if (!rendered) return false;
             WorldSnapshot world = BuildAwareWorld();
             if (!QueueGroupMessage(DateTime.UtcNow.AddSeconds(CalculateTypingDelay(reply)),
                 speaker, reply, world)) return false;
@@ -1680,17 +2161,27 @@ namespace ErenshorDeepSims
 
         // Topic fatigue advances only here, after an ambient line has actually been accepted for
         // display. Selection, budget suppression, and NO_MESSAGE deliberately leave the topic unused.
-        private void NoteAmbientTopicEmitted(DirectorEvent evt, string speaker, string emittedText)
+        private void NoteAmbientTopicEmitted(DirectorEvent evt, string speaker, string emittedText,
+            MemoryStore expectedMemory = null, int expectedCharacterGeneration = -1, int expectedConversationGeneration = -1)
         {
-            if (_director == null || evt == null || !evt.HasSeed) return;
-            _director.NoteAmbientTopicEmitted(evt, speaker, emittedText);
-            if (string.IsNullOrWhiteSpace(evt.VerifiedFact) && _memory != null && _slots != null)
+            if (evt == null || !evt.HasSeed) return;
+            MemoryStore memory = expectedMemory ?? _memory;
+            if (expectedCharacterGeneration >= 0 && expectedCharacterGeneration != Volatile.Read(ref _characterScopeGeneration)) return;
+            if (expectedConversationGeneration >= 0 && expectedConversationGeneration != CurrentConversationGeneration()) return;
+            if (expectedMemory != null && !ReferenceEquals(_memory, expectedMemory)) return;
+
+            // The director itself is character-scoped. Background work must not advance character B's
+            // topic fatigue after a switch from character A.
+            SocialDirector director = _director;
+            if (director == null) return;
+            director.NoteAmbientTopicEmitted(evt, speaker, emittedText);
+            if (string.IsNullOrWhiteSpace(evt.VerifiedFact) && memory != null && _slots != null)
             {
                 IList<SimSnapshot> active = _slots.GetActiveSnapshots();
                 for (int i = 0; active != null && i < active.Count; i++)
                     if (active[i] != null && string.Equals(active[i].Name, speaker, StringComparison.OrdinalIgnoreCase))
                     {
-                        _memory.RecordExpressedPreference(active[i], evt.TopicKey, emittedText);
+                        memory.RecordExpressedPreference(active[i], evt.TopicKey, emittedText);
                         break;
                     }
             }
@@ -1893,7 +2384,7 @@ namespace ErenshorDeepSims
                 }
                 catch (Exception ex)
                 {
-                    Logger.LogWarning("Official news lookup failed; refusing to guess current patch/expansion facts: " + ex.Message);
+                    Logger.LogWarning("Official news lookup failed; refusing to guess current patch/expansion facts: " + DiagnosticPrivacy.ExceptionType(ex));
                     WikiResult miss = new WikiResult();
                     miss.Query = query;
                     miss.SourceLabel = "official Erenshor Steam news";
@@ -1913,7 +2404,7 @@ namespace ErenshorDeepSims
                 }
                 catch (Exception ex)
                 {
-                    Logger.LogWarning("Automatic wiki lookup failed; refusing to guess game mechanics: " + ex.Message);
+                    Logger.LogWarning("Automatic wiki lookup failed; refusing to guess game mechanics: " + DiagnosticPrivacy.ExceptionType(ex));
                     WikiResult miss = new WikiResult();
                     miss.Query = query;
                     miss.SourceLabel = "Erenshor community wiki";
@@ -1925,7 +2416,7 @@ namespace ErenshorDeepSims
             if (ExternalNewsEnabledConfig.Value && ExternalNewsAutoLookupConfig.Value && ExternalNewsQueryClassifier.ShouldLookup(message))
             {
                 string query = ExternalNewsQueryClassifier.ExtractQuery(message);
-                Logger.LogDebug("knowledge route=external_news generation=" + (workGeneration < 0 ? CurrentConversationGeneration() : workGeneration) + " query=" + query);
+                Logger.LogDebug("knowledge route=external_news generation=" + (workGeneration < 0 ? CurrentConversationGeneration() : workGeneration) + " " + DiagnosticPrivacy.DescribeChars("query", query));
                 bool ttlValid = _lastExternalNews != null && (DateTime.UtcNow - _lastExternalNewsUtc).TotalMinutes < Math.Max(1, ExternalNewsTtlMinutesConfig.Value);
                 bool sameTopic = ttlValid && _lastExternalNews.Query != null &&
                     (string.Equals(_lastExternalNews.Query, query, StringComparison.OrdinalIgnoreCase) ||
@@ -1939,17 +2430,24 @@ namespace ErenshorDeepSims
                         ExternalNewsMaxResultsConfig.Value, Math.Max(2, ExternalNewsTimeoutSecondsConfig.Value),
                         Math.Max(300, ExternalNewsMaxCharsConfig.Value), Math.Max(1, ExternalNewsTtlMinutesConfig.Value)).ConfigureAwait(false);
                     int loggedGeneration = workGeneration < 0 ? CurrentConversationGeneration() : workGeneration;
-                    Logger.LogDebug("news lookup generation=" + loggedGeneration + " query=" + query + " results=" + (bundle != null && bundle.Items != null ? bundle.Items.Count : 0));
+                    Logger.LogDebug("news lookup generation=" + loggedGeneration + " " + DiagnosticPrivacy.DescribeChars("query", query) + " results=" + (bundle != null && bundle.Items != null ? bundle.Items.Count : 0));
                     if (bundle != null && bundle.Combined != null)
                     {
-                        _lastExternalNews = bundle;
-                        _lastExternalNewsUtc = DateTime.UtcNow;
+                        // A party request may finish after the player changed subject/character. The
+                        // stale caller will discard its reply, and it must not seed the new character's
+                        // external-news context as a side effect. Explicit /dsxnews calls pass no work
+                        // generation and retain their normal request-scoped cache behavior.
+                        if (workGeneration < 0 || workGeneration == CurrentConversationGeneration())
+                        {
+                            _lastExternalNews = bundle;
+                            _lastExternalNewsUtc = DateTime.UtcNow;
+                        }
                         return bundle.Combined;
                     }
                 }
                 catch (Exception ex)
                 {
-                    Logger.LogWarning("External news lookup failed; refusing to guess current events: " + ex.Message);
+                    Logger.LogWarning("External news lookup failed; refusing to guess current events: " + DiagnosticPrivacy.ExceptionType(ex));
                 }
                 WikiResult miss = new WikiResult();
                 miss.Query = query;
@@ -2282,6 +2780,10 @@ namespace ErenshorDeepSims
             PartyReplyIntent replyIntent = PartyReplyIntentClassifier.Classify(playerMessage);
             active = world.Party == null ? new List<SimSnapshot>() : new List<SimSnapshot>(world.Party);
             int conversationGeneration = CurrentConversationGeneration();
+            // Snapshot the memory store reference now, on the main thread, so the background
+            // continuation below still writes/reads through the correct character's store even if
+            // a character-scope switch swaps out the live _memory field while this is in flight.
+            MemoryStore requestMemory = _memory;
             List<ConversationLine> seedThread = GetRecentPartyConversation(5);
             string previousSpeaker = seedThread.Count == 0 ? null : seedThread[seedThread.Count - 1].Speaker;
             SimSnapshot speaker = SelectBestSpeaker(active, requestedSpeaker, playerMessage, previousSpeaker);
@@ -2335,7 +2837,7 @@ namespace ErenshorDeepSims
                     if (thread.Count == 0 || !string.Equals(thread[thread.Count - 1].Text, playerMessage, StringComparison.OrdinalIgnoreCase))
                         thread.Add(new ConversationLine(playerName, playerMessage));
 
-                    SimMemory speakerMemory = _memory.LoadForPrompt(speaker);
+                    SimMemory speakerMemory = requestMemory.LoadForPrompt(speaker);
                     List<ChatMessage> messages = PromptBuilder.BuildPartyThreadReply(speaker, speakerMemory, world, thread, 1, wiki, controlledKnowledgeDisagreement ? "tentative" : null, null, replyIntent);
                     string first = await TimedChatAsync(messages);
                     first = TextSanitizer.CleanReply(first, speaker.Name, playerName, Math.Max(80, MaxReplyCharactersConfig.Value));
@@ -2362,15 +2864,25 @@ namespace ErenshorDeepSims
                     // showed leaking "online"/"lol"/"heh" with roleplayGuardApplied=False.
                     bool groupGuardRan, groupGuardChanged, groupGuardRejected;
                     first = ApplyRoleplayOutputGuard(first, speaker.Name, out groupGuardRan, out groupGuardChanged, out groupGuardRejected);
+                    string groupFallbackReason = string.Empty;
                     if (groupGuardRejected)
                     {
+                        groupFallbackReason = "roleplay_guard_rejected";
                         string subjectiveAfterGuard;
                         groupUsedTemplate = true;
                         if (PartyReplyIntentClassifier.IsSubjective(replyIntent) && TryRenderSubjectiveReplyForPerspective(playerMessage, speaker, replyIntent, out subjectiveAfterGuard))
                             first = subjectiveAfterGuard;
                         else first = RenderUnknownFactReplyForPerspective(playerMessage, speaker);
+
+                        bool fallbackGuardRan, fallbackGuardChanged, fallbackGuardRejected;
+                        first = ApplyRoleplayOutputGuard(first, speaker.Name, out fallbackGuardRan, out fallbackGuardChanged, out fallbackGuardRejected);
+                        groupGuardRan = groupGuardRan || fallbackGuardRan;
+                        groupGuardChanged = groupGuardChanged || fallbackGuardChanged;
+                        groupGuardRejected = fallbackGuardRejected;
                     }
-                    LogRoleplayDiagnostic("group", speaker.Name, groupUsedTemplate, groupGuardRan, groupGuardChanged, groupGuardRejected);
+                    LogRoleplayDiagnostic("group", speaker.Name, groupUsedTemplate, groupGuardRan, groupGuardChanged, groupGuardRejected,
+                        replyIntent.ToString(), speaker.ClassName, wiki != null, 0, groupGuardRejected ? "suppressed" : "accepted", groupFallbackReason);
+                    if (groupGuardRejected || IsNoMessage(first)) return;
 
                     if (stale()) { NoteStaleDiscard("after-inference", isNewsAnswer ? "news" : null, conversationGeneration); return; }
                     DateTime due = DateTime.UtcNow.AddSeconds(CalculateTypingDelay(first));
@@ -2412,8 +2924,8 @@ namespace ErenshorDeepSims
                 }
                 catch (Exception ex)
                 {
-                    SetResponseStatus("error", ex.Message);
-                    Logger.LogWarning("Deep Sim party-chat thread failed: " + ex.Message);
+                    SetResponseStatus("error", DiagnosticPrivacy.ExceptionType(ex));
+                    Logger.LogWarning("Deep Sim party-chat thread failed: " + DiagnosticPrivacy.ExceptionType(ex));
                 }
                 finally { if (gateHeld) _inferenceGate.Release(); }
             });
@@ -2484,7 +2996,7 @@ namespace ErenshorDeepSims
                         });
                     }
                 }
-                catch (Exception ex) { Logger.LogDebug("Vanilla-party continuity generation stopped: " + ex.Message); }
+                catch (Exception ex) { Logger.LogDebug("Vanilla-party continuity generation stopped: " + DiagnosticPrivacy.ExceptionType(ex)); }
                 finally { if (gateHeld) _inferenceGate.Release(); }
             });
         }
@@ -2552,7 +3064,7 @@ namespace ErenshorDeepSims
             }
 
             Logger.LogDebug("Event conversation facts: type=" + candidate.Type + ", trust=" + candidate.Trust +
-                ", verified='" + candidate.VerifiedContext + "', eligible=" + eligible.Count);
+                ", " + DiagnosticPrivacy.DescribeChars("verifiedContext", candidate.VerifiedContext) + ", eligible=" + eligible.Count);
 
             int conversationGeneration = CurrentConversationGeneration();
             Func<bool> stale = delegate { return conversationGeneration != CurrentConversationGeneration(); };
@@ -2602,7 +3114,7 @@ namespace ErenshorDeepSims
                 }
                 catch (Exception ex)
                 {
-                    Logger.LogDebug("Verified event LLM stopped: " + ex.Message);
+                    Logger.LogDebug("Verified event LLM stopped: " + DiagnosticPrivacy.ExceptionType(ex));
                     EnqueueMainThread(delegate
                     {
                         if (ConversationTurnGuard.IsStale(conversationGeneration, CurrentConversationGeneration()))
@@ -2611,7 +3123,7 @@ namespace ErenshorDeepSims
                             return;
                         }
                         try { QueueTemplateVerifiedEvent(candidate, speaker, world, conversationGeneration); }
-                        catch (Exception templateEx) { Logger.LogDebug("Verified event template fallback stopped: " + templateEx.Message); }
+                        catch (Exception templateEx) { Logger.LogDebug("Verified event template fallback stopped: " + DiagnosticPrivacy.ExceptionType(templateEx)); }
                     });
                 }
                 finally { if (gateHeld) _inferenceGate.Release(); }
@@ -2621,6 +3133,8 @@ namespace ErenshorDeepSims
             List<SimSnapshot> eligible, WorldSnapshot world, string previousSpeaker, DateTime previousDue,
             int remainingReplies, int conversationGeneration)
         {
+            MemoryStore threadMemory = _memory;
+            int characterGeneration = Volatile.Read(ref _characterScopeGeneration);
             Dictionary<string, int> speakerCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             if (thread != null && thread.Count > 0) speakerCounts[thread[0].Speaker] = 1;
             DateTime due = previousDue;
@@ -2640,7 +3154,7 @@ namespace ErenshorDeepSims
                 try
                 {
                     if (conversationGeneration != CurrentConversationGeneration()) { NoteStaleDiscard("before-inference"); stopReason = "stale at model gate"; break; }
-                    SimMemory memory = _memory.LoadForPrompt(next);
+                    SimMemory memory = threadMemory == null ? null : threadMemory.LoadForPrompt(next);
                     List<ChatMessage> messages = PromptBuilder.BuildVerifiedEventThread(next, world, candidate, thread, generated + 2);
                     reply = await TimedChatAsync(messages);
                     reply = TextSanitizer.CleanReply(reply, next.Name, world != null && world.Player != null ? world.Player.Name : null, Math.Max(80, MaxReplyCharactersConfig.Value));
@@ -2677,10 +3191,13 @@ namespace ErenshorDeepSims
 
             try
             {
-                if (_memory != null && thread != null && thread.Count >= 2)
-                    _memory.RecordConversationThread(eligible, thread, world == null ? string.Empty : world.Scene);
+                if (threadMemory != null && thread != null && thread.Count >= 2 &&
+                    ReferenceEquals(_memory, threadMemory) &&
+                    CharacterScopeWriteGuard.CanCommit(characterGeneration, Volatile.Read(ref _characterScopeGeneration),
+                        conversationGeneration, CurrentConversationGeneration()))
+                    threadMemory.RecordConversationThread(eligible, thread, world == null ? string.Empty : world.Scene);
             }
-            catch (Exception ex) { Logger.LogDebug("Could not record event social thread: " + ex.Message); }
+            catch (Exception ex) { Logger.LogDebug("Could not record event social thread: " + DiagnosticPrivacy.ExceptionType(ex)); }
         }
 
         internal void QueueAutonomousReaction(DirectorEvent evt, string requestedSpeaker, bool allowFollowUp, bool forceMessage)
@@ -2720,10 +3237,12 @@ namespace ErenshorDeepSims
             }
 
             int conversationGeneration = CurrentConversationGeneration();
+            int characterGeneration = Volatile.Read(ref _characterScopeGeneration);
+            MemoryStore requestMemory = _memory;
             SocialIntent intent = string.IsNullOrWhiteSpace(evt.TopicKey) ? null : new SocialIntent(
                 "seed", evt.TopicKey, CurrentConversationId(), conversationGeneration, evt.PromptHint,
                 evt.VerifiedFact, speaker.Name);
-            SimMemory speakerMemory = _memory.LoadForPrompt(speaker);
+            SimMemory speakerMemory = requestMemory.LoadForPrompt(speaker);
             string situation = evt.Description;
             if (string.Equals(evt.Type, "idle", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(evt.Type, "camp_idle", StringComparison.OrdinalIgnoreCase) ||
@@ -2783,7 +3302,7 @@ namespace ErenshorDeepSims
                     if (stale()) { NoteStaleDiscard("before-display"); return; }
                     DateTime due = DateTime.UtcNow.AddSeconds(CalculateTypingDelay(first));
                     if (!QueueGroupMessage(due, speaker, first, world, false, !forceMessage, evt.Type, conversationGeneration)) return;
-                    NoteAmbientTopicEmitted(evt, speaker.Name, first);
+                    NoteAmbientTopicEmitted(evt, speaker.Name, first, requestMemory, characterGeneration, conversationGeneration);
 
                     _inferenceGate.Release();
                     gateHeld = false;
@@ -2803,7 +3322,7 @@ namespace ErenshorDeepSims
                 }
                 catch (Exception ex)
                 {
-                    Logger.LogWarning("Autonomous Deep Sim chatter failed: " + ex.Message);
+                    Logger.LogWarning("Autonomous Deep Sim chatter failed: " + DiagnosticPrivacy.ExceptionType(ex));
                     if (!forceMessage)
                         EnqueueMainThread(delegate
                         {
@@ -2983,8 +3502,7 @@ namespace ErenshorDeepSims
 
         private void RegisterOllamaFailure(Exception ex)
         {
-            string detail = ex == null || string.IsNullOrWhiteSpace(ex.Message) ? "Ollama connection failed" : ex.Message;
-            if (detail.Length > 160) detail = detail.Substring(0, 160) + "...";
+            string detail = ex == null ? "OllamaConnectionFailed" : DiagnosticPrivacy.ExceptionType(ex);
             _ollamaUnavailableReason = detail;
             int cooldown = OllamaFailureCooldownSecondsConfig == null ? 60 : Math.Max(5, OllamaFailureCooldownSecondsConfig.Value);
             _ollamaUnavailableUntilUtc = DateTime.UtcNow.AddSeconds(cooldown);
@@ -3016,12 +3534,20 @@ namespace ErenshorDeepSims
         // line. The old single roleplayGuardApplied bool was ambiguous between "the guard ran and
         // changed nothing" and "the guard never ran on this path at all" -- both looked like False.
         private void LogRoleplayDiagnostic(string source, string speakerName, bool usedTemplate,
-            bool roleplayGuardRan, bool roleplayGuardChanged, bool roleplayGuardRejected)
+            bool roleplayGuardRan, bool roleplayGuardChanged, bool roleplayGuardRejected,
+            string intent = null, string identityClass = null, bool retrievalUsed = false, int qualityRetryCount = 0,
+            string groundingDecision = null, string fallbackReason = null)
         {
             Logger.LogInfo("[DeepSims][RoleplayDiag] perspective=" + SocialPerspective.Describe(SocialPerspectiveState.Current) +
                 " expression=" + (usedTemplate ? "Template" : "LLM") +
                 " source=" + (source ?? "unknown") +
                 " speaker=" + (speakerName ?? "?") +
+                " intent=" + (string.IsNullOrWhiteSpace(intent) ? "unknown" : intent) +
+                " identityClass=" + (string.IsNullOrWhiteSpace(identityClass) ? "unknown" : identityClass) +
+                " retrievalUsed=" + retrievalUsed +
+                " qualityRetryCount=" + qualityRetryCount +
+                " groundingDecision=" + (string.IsNullOrWhiteSpace(groundingDecision) ? "unknown" : groundingDecision) +
+                " fallbackReason=" + (string.IsNullOrWhiteSpace(fallbackReason) ? "none" : fallbackReason) +
                 " roleplayPromptApplied=" + SocialPerspectiveState.RoleplayActive +
                 " roleplayGuardRan=" + roleplayGuardRan +
                 " roleplayGuardChanged=" + roleplayGuardChanged +
@@ -3091,7 +3617,8 @@ namespace ErenshorDeepSims
             // turn into the unknown-fact template even when the underlying identity fact WAS verified
             // (see PromptBuilder's identity-vs-asked-class cross reference). Knowledge-mode grounding
             // stays authoritative for factual questions; it is not the right gate for opinions.
-            bool skipKnowledgeGroundingForSubjectiveOpinion = directReplyIntent.HasValue && PartyReplyIntentClassifier.IsSubjective(directReplyIntent.Value);
+            bool skipKnowledgeGroundingForSubjectiveOpinion = directReplyIntent.HasValue &&
+                (PartyReplyIntentClassifier.IsSubjective(directReplyIntent.Value) || directReplyIntent.Value == PartyReplyIntent.IdentityFact);
             if (grounded && externalFacts != null && !IsNoMessage(line) && !skipKnowledgeGroundingForSubjectiveOpinion)
             {
                 string knowledgeReason;
@@ -3102,12 +3629,12 @@ namespace ErenshorDeepSims
                 }
             }
 
-            if (isExternalNewsAnswer) Logger.LogDebug("news answer generation attempt=1 query=" + Safe(externalFacts.Query) + " grounding=" + (grounded ? "accept" : "reject reason=" + reason));
+            if (isExternalNewsAnswer) Logger.LogDebug("news answer generation attempt=1 grounding=" + (grounded ? "accept" : "reject reason=" + reason));
 
             if (!grounded)
             {
                 SetResponseStatus("rejected", speaker.Name + ": " + reason);
-                Logger.LogWarning("Rejected ungrounded group line from " + speaker.Name + ": " + reason + " | " + line);
+                Logger.LogWarning("Rejected ungrounded group line from " + speaker.Name + ": " + reason + "; content omitted.");
                 // Retry keeps the SAME externalFacts/news bundle in `messages` (already built into the
                 // system prompt by PromptBuilder) so the corrective turn stays grounded in the same
                 // retrieved headlines rather than drifting into generic party chatter.
@@ -3142,7 +3669,7 @@ namespace ErenshorDeepSims
                         retryReason = knowledgeRetryReason;
                     }
                 }
-                if (isExternalNewsAnswer) Logger.LogDebug("news answer generation attempt=2 query=" + Safe(externalFacts.Query) + " grounding=" + (retryGrounded ? "accept" : "reject reason=" + retryReason));
+                if (isExternalNewsAnswer) Logger.LogDebug("news answer generation attempt=2 grounding=" + (retryGrounded ? "accept" : "reject reason=" + retryReason));
                 if (retryGrounded)
                 {
                     line = retry;
@@ -3231,6 +3758,8 @@ namespace ErenshorDeepSims
             string groundingFact = null, SocialIntent socialIntent = null)
         {
             if (thread == null || active == null || active.Count < 2 || remainingReplies <= 0) return;
+            MemoryStore threadMemory = _memory;
+            int characterGeneration = Volatile.Read(ref _characterScopeGeneration);
             Dictionary<string, int> speakerCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < thread.Count; i++)
             {
@@ -3296,7 +3825,10 @@ namespace ErenshorDeepSims
                 if (templateOnly)
                 {
                     string templateReply;
-                    if (!SocialTemplates.TryRenderThreadReply(threadLastText, next, out templateReply)) break;
+                    bool rendered = SocialPerspectiveState.RoleplayActive
+                        ? RoleplayTemplates.TryRenderThreadReply(threadLastText, next, out templateReply)
+                        : SocialTemplates.TryRenderThreadReply(threadLastText, next, out templateReply);
+                    if (!rendered) break;
                     reply = templateReply;
                 }
                 else
@@ -3308,7 +3840,7 @@ namespace ErenshorDeepSims
                     {
                         // The player may have spoken while this turn was queued behind another request.
                         if (conversationGeneration != CurrentConversationGeneration()) { NoteStaleDiscard("before-inference"); break; }
-                        SimMemory memory = _memory.LoadForPrompt(next);
+                        SimMemory memory = threadMemory == null ? null : threadMemory.LoadForPrompt(next);
                         List<ChatMessage> messages = PromptBuilder.BuildPartyThreadReply(next, memory, world, thread, generated + 2, wiki, forceKnowledgeCorrection && generated == 0 ? "correct" : null, groundingFact, PartyReplyIntent.FactualGameQuestion, socialIntent);
                         reply = await TimedChatAsync(messages);
                         reply = TextSanitizer.CleanReply(reply, next.Name, world != null && world.Player != null ? world.Player.Name : null, Math.Max(80, MaxReplyCharactersConfig.Value));
@@ -3346,12 +3878,15 @@ namespace ErenshorDeepSims
             // actually participated, without treating the dialogue itself as verified world facts.
             try
             {
-                if (_memory != null && thread.Count >= 2)
-                    _memory.RecordConversationThread(active, thread, world == null ? string.Empty : world.Scene);
+                if (threadMemory != null && thread.Count >= 2 &&
+                    ReferenceEquals(_memory, threadMemory) &&
+                    CharacterScopeWriteGuard.CanCommit(characterGeneration, Volatile.Read(ref _characterScopeGeneration),
+                        conversationGeneration, CurrentConversationGeneration()))
+                    threadMemory.RecordConversationThread(active, thread, world == null ? string.Empty : world.Scene);
             }
             catch (Exception ex)
             {
-                Logger.LogDebug("Could not record Deep Sims social thread: " + ex.Message);
+                Logger.LogDebug("Could not record Deep Sims social thread: " + DiagnosticPrivacy.ExceptionType(ex));
             }
         }
 
@@ -3544,7 +4079,7 @@ namespace ErenshorDeepSims
                         if (GroundingGuard.IsTooSimilar(_recentAiLines[i], rawText) ||
                             (newIdea.Length > 0 && string.Equals(newIdea, priorIdea, StringComparison.OrdinalIgnoreCase)))
                         {
-                            Logger.LogDebug("Suppressed globally repetitive Deep Sim idea from " + sim.Name + ": " + rawText);
+                            Logger.LogDebug("Suppressed globally repetitive Deep Sim idea from " + sim.Name + "; content omitted.");
                             return false;
                         }
                     }
@@ -3614,12 +4149,12 @@ namespace ErenshorDeepSims
                 }
                 catch (Exception ex)
                 {
-                    Logger.LogWarning("Suppressed queued group reply because output sanitization failed for " + line.Speaker + ": " + ex.Message);
+                    Logger.LogWarning("Suppressed queued group reply because output sanitization failed for " + line.Speaker + ": " + DiagnosticPrivacy.ExceptionType(ex));
                     continue;
                 }
                 if (GroundingGuard.HasInstructionLeak(shown))
                 {
-                    Logger.LogWarning("Blocked prompt/instruction leak at group-chat output boundary from " + line.Speaker + ": " + shown);
+                    Logger.LogWarning("Blocked prompt/instruction leak at group-chat output boundary from " + line.Speaker + "; content omitted.");
                     continue;
                 }
                 // Absolute last-chance central Roleplay guard: PersonalizeString and CleanReply both run
@@ -3631,6 +4166,11 @@ namespace ErenshorDeepSims
                 {
                     bool finalGuardChanged, finalGuardRejected;
                     shown = RoleplayOutputGuard.Enforce(shown, line.Speaker, out finalGuardChanged, out finalGuardRejected);
+                    Logger.LogInfo("[DeepSims][RoleplayFinal] source=" +
+                        (string.IsNullOrWhiteSpace(line.DiagnosticContext) ? "unknown" : line.DiagnosticContext) +
+                        " speaker=" + line.Speaker +
+                        " roleplayGuardRan=True roleplayGuardChanged=" + finalGuardChanged +
+                        " roleplayGuardRejected=" + finalGuardRejected);
                     if (finalGuardRejected || IsNoMessage(shown))
                     {
                         Logger.LogWarning("Blocked roleplay-guard-rejected line at final group-chat output boundary from " + line.Speaker);
@@ -3653,7 +4193,7 @@ namespace ErenshorDeepSims
                 Logger.LogDebug("emit utc=" + DateTime.UtcNow.ToString("HH:mm:ss.fff") + " source=" + (string.IsNullOrWhiteSpace(line.DiagnosticContext) ? "unknown" : line.DiagnosticContext) +
                     " speaker=" + line.Speaker + " topic=" + (string.IsNullOrWhiteSpace(line.DiagnosticContext) ? "n/a" : line.DiagnosticContext) + " conversationId=" + CurrentConversationId() +
                     " generation=" + line.ConversationGeneration + " seed=" + (line.DiagnosticContext ?? string.Empty).Contains("autonomous") +
-                    " callbackId=none event=none qualityChecked=True groundingChecked=True topicChecked=True text=" + shown);
+                    " callbackId=none event=none qualityChecked=True groundingChecked=True topicChecked=True textChars=" + shown.Length);
                 if (!IsNoMessage(shown))
                 {
                     // Recheck at the last possible point before the visible write. This is cheap and
@@ -3804,7 +4344,7 @@ namespace ErenshorDeepSims
                 }
                 catch (Exception ex)
                 {
-                    Logger.LogDebug("Bounded request work stopped: " + ex.Message);
+                    Logger.LogDebug("Bounded request work stopped: " + DiagnosticPrivacy.ExceptionType(ex));
                 }
             }
         }
@@ -3938,7 +4478,7 @@ namespace ErenshorDeepSims
                         SimSnapshot sim = active[i];
                         if (sim == null) continue;
                         sb.AppendLine();
-                        sb.AppendLine(sim.Name + " â€” " + sim.ClassName);
+                        sb.AppendLine(sim.Name + " - " + sim.ClassName);
                         List<string> lines = _memory == null ? null : _memory.Inspect(sim, sim.Key);
                         if (lines == null) continue;
                         for (int j = 0; j < lines.Count; j++) sb.AppendLine("- " + lines[j]);
@@ -3949,12 +4489,12 @@ namespace ErenshorDeepSims
                 sb.AppendLine("NOTE");
                 sb.AppendLine("Conversation summaries record that a topic was discussed; they do not make unverified dialogue into game-world facts.");
                 File.WriteAllText(path, sb.ToString(), new System.Text.UTF8Encoding(false));
-                WriteChat("[DeepSims] Exported session notes to " + path, "lightblue");
+                WriteChat("[DeepSims] Exported session notes to DeepSims/Exports/" + Path.GetFileName(path) + ". Treat this file as private social-history data.", "lightblue");
             }
             catch (Exception ex)
             {
-                Logger.LogWarning("Could not export Deep Sims session notes: " + ex);
-                WriteChat("[DeepSims] Session export failed: " + ex.Message, "red");
+                Logger.LogWarning("Could not export Deep Sims session notes: " + ex.GetType().Name);
+                WriteChat("[DeepSims] Session export failed. Check the Lunaris log for the error type.", "red");
             }
         }
 
@@ -3964,7 +4504,7 @@ namespace ErenshorDeepSims
             {
                 string status;
                 try { status = await _ollama.GetStatusAsync(EndpointConfig.Value, ModelConfig.Value, 5).ConfigureAwait(false); }
-                catch (Exception ex) { status = "Ollama unavailable: " + ex.Message; }
+                catch (Exception ex) { status = "Ollama unavailable: " + DiagnosticPrivacy.ExceptionType(ex); }
                 EnqueueMainThread(delegate
                 {
                     RefreshSlots();
@@ -4010,8 +4550,7 @@ namespace ErenshorDeepSims
                 }
                 catch (Exception ex)
                 {
-                    string detail = ex.Message == null ? "unknown error" : ex.Message;
-                    if (detail.Length > 180) detail = detail.Substring(0, 180) + "...";
+                    string detail = DiagnosticPrivacy.ExceptionType(ex);
                     EnqueueMainThread(delegate { WriteChat("[DeepSims Wiki] Lookup failed: " + detail, "red"); });
                 }
             });
@@ -4040,8 +4579,7 @@ namespace ErenshorDeepSims
                 }
                 catch (Exception ex)
                 {
-                    string detail = ex.Message == null ? "unknown error" : ex.Message;
-                    if (detail.Length > 180) detail = detail.Substring(0, 180) + "...";
+                    string detail = DiagnosticPrivacy.ExceptionType(ex);
                     EnqueueMainThread(delegate { WriteChat("[DeepSims News] Lookup failed: " + detail, "red"); });
                 }
             });
@@ -4086,8 +4624,7 @@ namespace ErenshorDeepSims
                 }
                 catch (Exception ex)
                 {
-                    string detail = ex.Message == null ? "unknown error" : ex.Message;
-                    if (detail.Length > 180) detail = detail.Substring(0, 180) + "...";
+                    string detail = DiagnosticPrivacy.ExceptionType(ex);
                     EnqueueMainThread(delegate { WriteChat("[DeepSims News] External lookup failed: " + detail, "red"); });
                 }
             });
@@ -4132,8 +4669,7 @@ namespace ErenshorDeepSims
                 }
                 catch (Exception ex)
                 {
-                    string detail = ex.Message == null ? "unknown error" : ex.Message;
-                    if (detail.Length > 180) detail = detail.Substring(0, 180) + "...";
+                    string detail = DiagnosticPrivacy.ExceptionType(ex);
                     EnqueueMainThread(delegate { WriteChat("[DeepSims] AI test failed: " + detail, "red"); });
                 }
                 finally { _inferenceGate.Release(); }
@@ -4148,9 +4684,9 @@ namespace ErenshorDeepSims
                 Directory.CreateDirectory(dir);
                 string path = Path.Combine(dir, "party-diagnostic.txt");
                 File.WriteAllText(path, PartyResolver.BuildDiagnosticReport());
-                WriteChat("[DeepSims] Wrote party diagnostic to: " + path, "yellow");
+                WriteChat("[DeepSims] Wrote party diagnostic to DeepSims/party-diagnostic.txt. Review it before sharing; it contains current game-state diagnostics.", "yellow");
             }
-            catch (Exception ex) { WriteChat("[DeepSims] Diagnostic failed: " + ex.Message, "red"); }
+            catch (Exception ex) { Logger.LogWarning("Party diagnostic write failed: " + ex.GetType().Name); WriteChat("[DeepSims] Diagnostic write failed. Check the Lunaris log for the error type.", "red"); }
         }
 
         internal void LogPluginError(string message) { Logger.LogError(message); }

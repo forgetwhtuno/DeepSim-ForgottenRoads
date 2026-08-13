@@ -37,6 +37,18 @@ namespace ErenshorDeepSims
         private static string _lastType = string.Empty;
         private static string _lastSource = string.Empty;
 
+        internal static void ResetRuntimeState()
+        {
+            lock (DedupLock)
+            {
+                Dedup.Clear();
+                _acceptedEvents = 0;
+                _duplicateEvents = 0;
+                _lastType = string.Empty;
+                _lastSource = string.Empty;
+            }
+        }
+
         internal static void Handle(DeepSimsPlugin plugin, VerifiedDuelEvent value, string source)
         {
             if (plugin == null || value == null || !plugin.EnabledConfig.Value) return;

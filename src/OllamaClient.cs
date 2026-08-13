@@ -117,7 +117,9 @@ namespace ErenshorDeepSims
             // List<T> proved too opaque: an omitted/empty messages array makes Ollama treat
             // the call like a model-load request and return done_reason=load.
             string requestJson = BuildChatRequestJson(body);
-            if (_log != null) _log.LogDebug("Ollama chat request: utc=" + DateTime.UtcNow.ToString("HH:mm:ss.fff") + " " + TrimForLog(requestJson, 1400));
+            if (_log != null) _log.LogDebug("Ollama chat request: utc=" + DateTime.UtcNow.ToString("HH:mm:ss.fff") +
+                " model=" + Safe(model) + " messages=" + (messages == null ? 0 : messages.Count) +
+                " " + DiagnosticPrivacy.DescribeChars("request", requestJson) + " numCtx=" + options.num_ctx + " numPredict=" + options.num_predict);
             string responseJson = PostJson(endpoint, requestJson, timeoutSeconds);
 
             // Do not use Unity JsonUtility for Ollama's response envelope. In Unity 2021
@@ -143,7 +145,9 @@ namespace ErenshorDeepSims
             }
 
             if (_log != null && !string.IsNullOrWhiteSpace(result.Content))
-                _log.LogDebug("Ollama reply parsed successfully: utc=" + DateTime.UtcNow.ToString("HH:mm:ss.fff") + " " + TrimForLog(result.Content, 300));
+                _log.LogDebug("Ollama reply parsed successfully: utc=" + DateTime.UtcNow.ToString("HH:mm:ss.fff") +
+                    " chars=" + result.Content.Length + " eval_count=" + result.EvalCount +
+                    " prompt_eval_count=" + result.PromptEvalCount);
 
             return result;
         }
@@ -156,7 +160,7 @@ namespace ErenshorDeepSims
                 " done_reason=" + Safe(attempt.DoneReason) +
                 " eval_count=" + attempt.EvalCount +
                 " thinking_chars=" + (attempt.Thinking == null ? 0 : attempt.Thinking.Length) +
-                " raw=" + TrimForLog(attempt.Raw, 1200);
+                " response_chars=" + (attempt.Raw == null ? 0 : attempt.Raw.Length);
             _log.LogWarning(diagnostic);
         }
 
@@ -165,7 +169,7 @@ namespace ErenshorDeepSims
             string detail = "Ollama returned no final chat text";
             if (!string.IsNullOrWhiteSpace(attempt.DoneReason)) detail += " (done_reason=" + attempt.DoneReason + ")";
             if (!string.IsNullOrWhiteSpace(attempt.Thinking)) detail += "; thinking was returned but no final answer";
-            detail += ". Check the Lunaris console/log for the raw Ollama response.";
+            detail += ". Check the Lunaris console/log for response metadata.";
             return detail;
         }
 
@@ -243,8 +247,7 @@ namespace ErenshorDeepSims
                 }
                 catch (Exception ex)
                 {
-                    string detail = ex.Message == null ? "model lookup failed" : ex.Message;
-                    if (detail.Length > 180) detail = detail.Substring(0, 180) + "...";
+                    string detail = DiagnosticPrivacy.ExceptionType(ex);
                     return "Ollama is running, but '" + model + "' could not be opened. Run: ollama pull " + model + " (" + detail + ")";
                 }
             });
@@ -307,7 +310,7 @@ namespace ErenshorDeepSims
             catch (WebException ex)
             {
                 string detail = ReadWebException(ex);
-                if (_log != null) _log.LogWarning("Ollama request failed: " + detail);
+                if (_log != null) _log.LogWarning("Ollama request failed: " + ex.Status);
                 throw new InvalidOperationException(detail, ex);
             }
         }

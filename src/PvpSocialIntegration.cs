@@ -14,6 +14,12 @@ namespace ErenshorDeepSims
         private static string _lastKey = string.Empty;
         private static DateTime _lastUtc = DateTime.MinValue;
 
+        internal static void ResetRuntimeState()
+        {
+            _lastKey = string.Empty;
+            _lastUtc = DateTime.MinValue;
+        }
+
         // Kept for PvP builds older than contract v2, which carry no classification.
         public static void NotifyPvpEvent(string eventType, string matchId, string opponent,
             string zone, string decision, string reasonToken)

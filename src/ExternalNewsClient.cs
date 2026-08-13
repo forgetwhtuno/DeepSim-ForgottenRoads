@@ -138,7 +138,7 @@ namespace ErenshorDeepSims
             }
 
             string diagnostics = DescribeAttempts(attempts);
-            if (_log != null) _log.LogDebug("External news lookup '" + cleanQuery + "' -> " + items.Count + " item(s); " + diagnostics);
+            if (_log != null) _log.LogDebug("External news lookup -> " + items.Count + " item(s); " + DiagnosticPrivacy.DescribeChars("query", cleanQuery) + "; " + diagnostics);
 
             ExternalNewsBundle bundle = BuildBundle(cleanQuery, items, maxChars, diagnostics);
             lock (_cacheLock)
@@ -340,12 +340,12 @@ namespace ErenshorDeepSims
             }
             catch (WebException ex)
             {
-                if (_log != null) _log.LogWarning("External news request failed: " + ex.Message);
+                if (_log != null) _log.LogWarning("External news request failed: " + ex.Status);
                 throw;
             }
             catch (TimeoutException ex)
             {
-                if (_log != null) _log.LogWarning("External news request timed out: " + ex.Message);
+                if (_log != null) _log.LogWarning("External news request timed out: " + DiagnosticPrivacy.ExceptionType(ex));
                 throw new InvalidOperationException("External news request timed out: " + ex.Message, ex);
             }
         }

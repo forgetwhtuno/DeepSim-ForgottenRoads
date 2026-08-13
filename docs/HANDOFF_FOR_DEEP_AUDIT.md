@@ -1,127 +1,174 @@
-# Handoff for Deep Audit
+# Deep Sims — Post-Audit Handoff
 
-Written for a technical reviewer (human or AI) picking this repo up cold. Points at the
-authoritative sources rather than re-deriving them, and records this session's live evidence so
-you don't have to re-run everything just to get back to where things currently stand.
+**Audit date:** 2026-08-13  
+**Base branch:** `agent/lunaris-native-deepsims`  
+**Exact base SHA:** `b21b4d4150e0baffcc2d48ec6b44d6489e057d86`
 
-## Architectural boundaries — read `AGENTS.md` first
+This is a local-integration handoff. No Git write was performed by the audit.
 
-This repo's root `AGENTS.md` (~1350 lines) is the authoritative architecture document. Section 1
-("Non-Negotiable Architecture Rules") is load-bearing and predates this session — do not treat
-anything below as superseding it:
+## Read first
 
-- **1.1 Erenshor controls gameplay.** Deep Sims never decides combat, movement, loot, or party
-  state. It observes and talks.
-- **1.2 Facts and flavor must stay separate.** Only content explicitly labeled VERIFIED in a
-  prompt is treated as ground truth by the model; everything else (prior chat, personality,
-  preferences) is dialogue continuity only, never evidence a game event occurred.
-- **1.3 Never fabricate personal history.** No invented past events, relationships, or biography.
-- **1.4 Prefer actual experience over wiki knowledge** when both are available.
-- **1.5 Silence is valid** — `NO_MESSAGE` is a correct, expected output, not a failure mode.
-- **1.6 Sims are MMO players, not assistants** (in MMO perspective) — this session added a second,
-  distinct identity contract for Roleplay perspective (see below); the two must never both appear
-  in one prompt (enforced in `PromptBuilder.BuildSystemPrompt` by a single `if (roleplay) {...}
-  else {...}` branch, not by layering).
-- **1.7 Never alter Erenshor save files.** All mod-owned state lives under its own sidecar
-  storage, never inside the game's own save data.
+1. `AGENTS.md` — architectural authority.
+2. `docs/DEEP_ARCHITECTURE_AUDIT.md` — current technical map and request flows.
+3. `docs/CURRENT_WORK.md` — evidence-labelled current status and release blockers.
+4. `LUNARIS_RELEASE_CHECKLIST.md` — broader migration/live checks.
 
-## Two distinct "voice" concepts — do not conflate them
+## Non-negotiable authority boundary
 
-- **Expression mode** (`SocialPolicy`/`ExpressionMode`): *how* a line is produced — LLM vs.
-  deterministic template vs. off. Orthogonal to perspective.
-- **Perspective** (`SocialPerspective`/`SocialPerspectiveState`, `src/RoleplayPerspective.cs`):
-  *who* is speaking — an MMO player describing playing the game, or the in-world adventurer
-  itself. `/dsroleplay on|off|status` controls this. This is what this session's investigation was
-  about. The two axes are meant to be fully independent — Roleplay-mode dialogue can still come
-  from either the LLM or the deterministic-template backend
-  (`RoleplayExpressionRouter`), and the choice of backend is expression mode's decision, not
-  perspective's.
+Erenshor owns gameplay truth and gameplay decisions. Deep Sims may observe, remember bounded verified/social context, and express social flavor. The LLM never gets authority to move Sims, attack, heal, loot, equip, quest, choose pulls/targets, toggle combat automation, change faction, or write native save truth.
 
-## Current Lunaris lifecycle requirements
+The embedded legacy `/dsfollow` path moves only the local human player toward a selected local Sim and is automatically disabled when standalone Erenshor Follow is detected. This audit did not expand it.
 
-This plugin is a native Lunaris plugin (`[LunarisPlugin(...)]`/`[LunarisPermission(...)]`), not
-BepInEx — migrated this session's predecessor work (parent commit `bc41870`). Standard lifecycle:
-`Awake()` registers config and Harmony patches; `OnDestroy()` must fully unpatch Harmony and clear
-any static/AppDomain-level event subscriptions (a prior fix in this migration specifically closed
-a hot-reload event leak where `AppDomain.CurrentDomain.AssemblyLoad` was subscribed from a static
-constructor with no unsubscribe — check for this anti-pattern anywhere new code adds a
-process-wide event handler).
+## Main changes made by this audit
 
-**Open question, not resolved this session**: a real live log showed every native-Lunaris mod in
-the wider suite (not Deep Sims specifically — this is suite-wide) running its full `Awake()`
-twice per process bootstrap with no `OnDestroy` between the two passes. See
-`Erenshor-Mod-Suite/docs/CURRENT_WORK.md` for the full cross-suite evidence and reasoning (a
-sibling repo, `ErenshorContracts`, now carries a temporary instance-identity diagnostic
-specifically to resolve this). Deep Sims does not currently carry that diagnostic itself. If this
-investigation later confirms two genuinely coexisting live instances, and if Deep Sims turns out
-to be affected the same way (plausible, but not isolated/confirmed for this repo specifically),
-the practical risk here would be double LLM requests, double social-budget consumption, or two
-independent conversation-state machines racing — worth explicitly checking once the suite-wide
-question is settled.
+### Roleplay
 
-## Important files
+- final Roleplay enforcement at the actual group display boundary;
+- whisper replacement fallback is revalidated before display;
+- structural out-of-world language is rejected while typed-chat texture is sanitize-able;
+- ambiguous ordinary uses of words such as `game`, `session`, and `player` are no longer blanket-rejected;
+- explicit `IdentityFact` intent separates native identity from wiki definition and from subjective opinion;
+- Roleplay deterministic ritual/thread templates no longer fall through to MMO templates;
+- final Roleplay diagnostics expose ran/changed/rejected without logging prompt text.
 
-- `src/PromptBuilder.cs` — all LLM system-prompt construction. `BuildSystemPrompt` is the shared
-  core every other `Build*` method calls; the perspective branch lives here.
-- `src/RoleplayPerspective.cs` — perspective state, the MMO/Roleplay identity-block contract, the
-  chat-texture stripping regex, and (as of this session) `RoleplayOutputGuard`, the central
-  post-generation content guard for Roleplay mode.
-- `src/DeepSimsPlugin.cs` — the plugin entry point and by far the largest file; owns command
-  parsing, the group-chat/whisper/autonomous emission paths, and (as of this session) the
-  perspective-aware dispatch wrappers and diagnostic logging around each emission path.
-- `src/SocialFoundation.cs` — `PartyReplyIntentClassifier` and related intent/topic
-  classification. The subjective-vs-factual routing bug fixed this session lived here.
-- `src/GroundingGuard` (grep for the class, spread across relevant files) — the mechanism that
-  rejects LLM output making unverified factual/event claims. Distinct from
-  `RoleplayOutputGuard` — grounding checks truth claims regardless of perspective;
-  `RoleplayOutputGuard` checks perspective-appropriate *voice*, regardless of truth.
-- `src/RoleplayDeterministicTests.cs` — the Roleplay-specific regression suite, runnable live via
-  `/dsguardtest` (this session fixed it being written but never wired to any command).
-- `AGENTS.md` — the architecture rules above, plus a large priority/roadmap section (P0-P2) that
-  predates this session and reflects a different planning cycle; treat the roadmap section as
-  historical context, not a current task queue, unless told otherwise.
+### Character scope / memory
 
-## Known fragile paths
+- per-character memory directories using verified slot+name where available;
+- old flat memory retained as unscoped legacy data, never auto-claimed;
+- scope switch invalidates queued/in-flight presentation ownership;
+- delayed conversation memory writes and autonomous preference callbacks are generation/store guarded;
+- stale external-news lookups cannot seed the new character's temporary context.
 
-- **Perspective/expression orthogonality.** It's easy to accidentally couple them when adding a
-  new emission path — always check both "does this respect `SocialPerspectiveState.RoleplayActive`"
-  and "does this respect the configured expression mode" independently.
-- **Fallback/guard call sites are scattered by necessity** (group reply, group retry, whisper,
-  `/dstalk`, autonomous, verified-event reply, template fallback all have their own code path)
-  which is exactly why this session's central `RoleplayOutputGuard` still needed per-call-site
-  wiring rather than being a single interception point. A new emission path added later needs to
-  remember to call it — there is no compiler-enforced guarantee here. If you're auditing for
-  regressions, grep for every `WriteChat(` call that shows Sim dialogue and confirm each one's
-  candidate string passed through the guard while Roleplay is active.
-- **The wiki/wiki-lookup path and the native-identity path are separate signal sources that need
-  explicit cross-referencing** (this session's identity-cross-reference fix) — a wiki lookup
-  answers "what is a Windblade," never "is this Sim a Windblade." Any new content path that
-  touches class/identity facts needs to keep sourcing that from verified native Sim state
-  (`SimSnapshot.ClassName`, confirmed this session to be sourced only from native `CharacterClass`
-  reflection in `src/SimContextReader.cs`, never inferred from a name or a wiki result) rather
-  than assuming a wiki result implies identity.
+### Lifecycle
 
-## What NOT to redesign
+- Deep Sims static legacy follow state resets on unload;
+- Duel/PvP/Nemesis Deep-Sims-owned dedup/diagnostic state resets on unload;
+- existing request-generation/Harmony/AppDomain cleanup retained;
+- no singleton workaround added for the suite-wide duplicate-Lunaris discovery issue.
 
-- Do not merge PR #2 without an explicit instruction to do so at that moment.
-- Do not broadly rewrite Deep Sims to "improve" Roleplay quality by making output more
-  flowery/theatrical — the user has been explicit twice this session that Roleplay ≠
-  Shakespeare/fantasy theatrics; it means perspective/identity (MMO player vs. in-world
-  adventurer), and correct style stays plain, modern, and short.
-- Do not touch PvP combat/matchmaking from this repo (Deep Sims' PvP integration is
-  read/observe-only by design — see `AGENTS.md` section 5-adjacent co-op/integration sections).
-- Do not add a defensive duplicate-plugin-instance guard here (or anywhere in the suite) until the
-  cross-suite investigation referenced above is actually resolved by a live run.
+### Privacy
 
-## Current live evidence (this session)
+- default Ollama/wiki/news diagnostics no longer dump raw prompt/query/reply text;
+- ordinary final/rejection logs use metadata/reason rather than generated content;
+- export/diagnostic chat responses no longer reveal absolute filesystem paths;
+- explicit session export remains intentionally content-bearing and is labeled private.
 
-See `docs/CURRENT_WORK.md` for the full trail, including the two rounds of Roleplay
-investigation, the exact bad lines observed, the exact fixes, and the exact diagnostic field
-names now in the code (`roleplayGuardRan`/`roleplayGuardChanged`/`roleplayGuardRejected`). Short
-version: Ollama connectivity, group chat, and grounding-rejection/retry all confirmed live-working;
-the Roleplay-specific fixes described there are build/test-verified only, not yet live-retested.
+### Optional Hub API
 
-## Questions still unanswered
+- `DeepSimsControlApi` schema v1; late-bound and optional;
+- primitive/string status only;
+- safe setters for social mode/activity/Roleplay and status refresh;
+- no raw memory, key, arbitrary command, Unity object, or gameplay action exposure.
 
-See `docs/CURRENT_WORK.md`'s "Known open questions" and "Next deep audit questions" sections —
-not duplicated here to avoid the two docs drifting apart. Read that file for the current list.
+## Runtime assumptions that require the real game
+
+The new character identity adapter uses the same current game surface already used by sibling suite mods:
+
+- `GameData.InCharSelect`
+- `GameData.PlayerControl.Myself`
+- `GameData.CurrentCharacterSlot` / `GameData.ActiveSaveSlot`
+- `SaveGameData.index` / `SaveGameData.CharName`
+
+Sim class identity remains sourced from native Sim/Stats state and normalizes legacy/internal `Duelist` to current `Windblade` terminology. Wiki results are never identity authority.
+
+These symbols must still compile against the user's current `Assembly-CSharp.dll`; Erenshor is Early Access and no internal member is a stable SDK promise.
+
+## Exact local test/build commands
+
+From the DeepSim-erenshor repository root on Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tests\RUN_DETERMINISTIC_TESTS.ps1
+```
+
+For a real current-assembly build:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\BUILD_AND_INSTALL.ps1 `
+  -GameDir "<Erenshor>" `
+  -LunarisLibDir "<directory-containing-Lunaris.dll-and-0Harmony.dll>"
+```
+
+The build script intentionally uses the installed game's managed assemblies and must produce `ErenshorDeepSims.dll` with no `BepInEx.dll` dependency. It also contains pre-existing suite convenience logic that can invoke sibling builds when they are present; run it from the intended local suite workspace and review its output before installing anything.
+
+If doing compile-only verification, follow `BUILD_AND_INSTALL.ps1`'s exact reference list but redirect `/out:` to a scratch directory instead of the live plugin directory.
+
+## Compiler/API discrepancies to watch for
+
+- `SaveGameData`, `CurrentCharacterSlot`, `ActiveSaveSlot`, `CharName`, or `index` changed in a newer Erenshor build.
+- Harmony target shape changed for `TypeText.CheckCommands`, social-log methods, or optional Duel patches.
+- current Lunaris `LunarisPlugin`/config/log API changed from the branch's migration baseline.
+- `UpdateSocialLog.LogAdd` overload shape changed after another Erenshor chat refactor.
+- a current loader changes whether duplicate native plugin discovery produces duplicate live plugin objects.
+
+Fail closed and inspect current assemblies rather than inventing replacement members.
+
+## Exact live tests before release
+
+### Roleplay LLM
+
+1. `/dsroleplay on`
+2. ask normal greeting/small talk repeatedly; no `online`, `server`, `NES`, `hit me up`, `lol/lmao/heh`, emoticons.
+3. `Dancer, what is a Windblade?` -> definition/knowledge route.
+4. `Dancer, are you a Windblade?` -> native identity route; Dancer should resolve legacy Duelist as Windblade if that is still the native live class.
+5. `Dancer, what do you think about being a Windblade?` -> bounded opinion, e.g. “I like it. Getting in close suits me.”; no invented years/history.
+6. Ask the same subjective question about a class Dancer is not -> correct the premise, do not adopt the class.
+7. Confirm logs show `roleplayGuardRan=True` for final Sim-spoken Roleplay output and do not contain prompt/reply payload dumps.
+
+### Perspective/template matrix
+
+Test all four:
+
+- Roleplay + LLM
+- Roleplay + Templates
+- MMO + LLM
+- MMO + Templates
+
+Roleplay must remain in-world; MMO mode may retain MMO-player framing and shorthand. Templates must not silently switch perspective.
+
+### Lunaris pending-request unload blocker
+
+Repeat 3-5 times:
+
+1. load Deep Sims;
+2. start a visibly pending Ollama request;
+3. disable Deep Sims in Lunaris before it returns;
+4. wait longer than the request's normal completion window;
+5. **no old Sim output appears**;
+6. re-enable;
+7. exactly one command path and one response path;
+8. confirm one active heartbeat/instance owner with `[DeepSimsInstanceDiag]`;
+9. repeat after zoning.
+
+If two instance serials heartbeat concurrently, stop release reconciliation and inspect Lunaris/Hub loader behavior before adding any per-mod singleton workaround.
+
+### Character switching
+
+1. Character A: group with a known Sim, create visible familiarity/conversation, then exit to character select.
+2. Character B: group with the same Sim; A's conversation/familiarity/preferences must not appear.
+3. Trigger an Ollama/thread request on A and switch before it completes; no A line or memory write may appear under B.
+4. Switch back to A; A's scoped memory should still be present.
+5. Inspect `Memory/Characters/` only if needed; do not manually alter Erenshor saves.
+
+### Privacy
+
+- normal Ollama requests/replies: logs show metadata only, not player lines/system prompts/memory text;
+- `/dsexport`: explicit file contains expected social/session content and chat labels it private without absolute path;
+- `/dsdump`: chat gives relative diagnostic location only;
+- inspect the exported/diagnostic file before attaching it to a public bug report.
+
+### Performance
+
+Use `/dsperf` while reproducing a hitch. Compare party snapshot, telemetry, social, queue, and Ollama timing. A temporal overlap is not causation; report measured stage cost separately from frame hitch duration.
+
+## Deliberately untouched behavior
+
+- command syntax is preserved;
+- unknown/vanilla commands still fall through;
+- MMO perspective semantics remain intentionally distinct from Roleplay;
+- social cadence/budget values were not retuned;
+- native combat/movement/loot/save authority was not expanded;
+- COOP still uses conservative host-local generated speech where party-targeted replication is unproven;
+- optional sibling integrations remain absent-safe/reflection based;
+- no Hub UI was implemented here;
+- no loader-level duplicate-instance hack was added.

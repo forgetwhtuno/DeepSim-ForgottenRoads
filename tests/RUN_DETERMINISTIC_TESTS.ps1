@@ -23,6 +23,13 @@ if (-not (Test-Path $webExtensions)) { throw "System.Web.Extensions.dll was not 
 
 $sourceFiles = @(
     (Join-Path $repoRoot "src\DeepSimsLog.cs"),
+    (Join-Path $repoRoot "src\DiagnosticPrivacy.cs"),
+    (Join-Path $repoRoot "src\DiagnosticPrivacyTests.cs"),
+    (Join-Path $repoRoot "src\CharacterScopeKey.cs"),
+    (Join-Path $repoRoot "src\CharacterScopeWriteGuard.cs"),
+    (Join-Path $repoRoot "src\CharacterScopeDeterministicTests.cs"),
+    (Join-Path $repoRoot "src\DeepSimsControlPolicy.cs"),
+    (Join-Path $repoRoot "src\DeepSimsControlPolicyTests.cs"),
     (Join-Path $repoRoot "src\Models.cs"),
     (Join-Path $repoRoot "src\RelationshipModel.cs"),
     (Join-Path $repoRoot "src\SocialFoundation.cs"),

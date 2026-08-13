@@ -15,6 +15,12 @@ namespace ErenshorDeepSims
         };
         private static string _last; private static DateTime _lastUtc;
 
+        internal static void ResetRuntimeState()
+        {
+            _last = null;
+            _lastUtc = DateTime.MinValue;
+        }
+
         public static void NotifyNemesisEvent(string eventType, string nemesisName, string zone, string matchId, string result)
         {
             DeepSimsPlugin plugin = DeepSimsPlugin.Instance; string type = Token(eventType, 48);

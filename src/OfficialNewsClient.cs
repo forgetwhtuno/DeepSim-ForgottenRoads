@@ -67,7 +67,7 @@ namespace ErenshorDeepSims
                 result.Title = title.ToString();
                 result.Extract = Trim(extract.ToString(), Math.Max(350, maxChars));
                 result.Found = !string.IsNullOrWhiteSpace(result.Extract);
-                if (_log != null) _log.LogDebug("Official news lookup '" + cleanQuery + "' -> " + result.Title);
+                if (_log != null) _log.LogDebug("Official news lookup matched " + selected.Count + " item(s); " + DiagnosticPrivacy.DescribeChars("query", cleanQuery) + " extractChars=" + (result.Extract == null ? 0 : result.Extract.Length));
                 return result;
             });
         }
@@ -89,12 +89,12 @@ namespace ErenshorDeepSims
             }
             catch (WebException ex)
             {
-                if (_log != null) _log.LogWarning("Official Erenshor Steam-news request failed: " + ex.Message);
+                if (_log != null) _log.LogWarning("Official Erenshor Steam-news request failed: " + ex.Status);
                 throw;
             }
             catch (TimeoutException ex)
             {
-                if (_log != null) _log.LogWarning("Official Erenshor Steam-news request timed out: " + ex.Message);
+                if (_log != null) _log.LogWarning("Official Erenshor Steam-news request timed out: " + DiagnosticPrivacy.ExceptionType(ex));
                 throw new InvalidOperationException("Official Erenshor Steam-news request timed out: " + ex.Message, ex);
             }
         }

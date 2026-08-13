@@ -153,6 +153,7 @@ namespace ErenshorDeepSims
     internal enum PartyReplyIntent
     {
         FactualGameQuestion,
+        IdentityFact,
         VerifiedHistoryQuestion,
         Opinion,
         Preference,
@@ -186,6 +187,20 @@ namespace ErenshorDeepSims
                 m.IndexOf("favourite", StringComparison.Ordinal) >= 0 ||
                 m.IndexOf("your opinion", StringComparison.Ordinal) >= 0)
                 return PartyReplyIntent.Opinion;
+
+            // Direct present-tense questions about the addressed Sim's own verified class are
+            // identity facts, not wiki-definition questions. Keep this after explicit opinion
+            // phrases so "what do you think about being a Windblade?" remains subjective.
+            // The second alternative identifies "Is <SimName> a Windblade?"-style identity questions
+            // about a party member. Without excluding articles/question words as the subject, "\w+"
+            // also happily consumes "a" itself, so a plain definition question like "what is a
+            // windblade?" ("is" + "a" + "windblade") was misclassified as IdentityFact and never
+            // reached the factual/wiki branch below. Require the subject token to look like an actual
+            // name/pronoun rather than an article or question word.
+            if (Regex.IsMatch(m, @"\b(?:are|aren't|are not)\s+you\s+(?:really\s+|actually\s+)?(?:a|an|the)?\s*(?:arcanist|druid|paladin|reaver|stormcaller|windblade|duelist)\b", RegexOptions.IgnoreCase) ||
+                Regex.IsMatch(m, @"\b(?:is|isn't|is not)\s+(?!a\b|an\b|the\b|what\b|it\b|that\b|this\b)\w+\s+(?:really\s+|actually\s+)?(?:a|an|the)?\s*(?:arcanist|druid|paladin|reaver|stormcaller|windblade|duelist)\b", RegexOptions.IgnoreCase))
+                return PartyReplyIntent.IdentityFact;
+
             if (KnowledgeQueryClassifier.ShouldLookup(message) || ExternalNewsQueryClassifier.ShouldLookup(message) ||
                 m.IndexOf("latest patch", StringComparison.Ordinal) >= 0 ||
                 m.IndexOf("newest patch", StringComparison.Ordinal) >= 0 ||

@@ -592,6 +592,11 @@ namespace ErenshorDeepSims
             _windowSeconds = Math.Max(1.0, windowSeconds);
         }
 
+        internal void Clear()
+        {
+            _recent.Clear();
+        }
+
         internal bool TryAccept(VerifiedDuelEvent value, DateTime now)
         {
             if (value == null) return false;
@@ -655,6 +660,15 @@ namespace ErenshorDeepSims
             Add(results, "policy/completed higher social value", DuelSocialPolicy.ReactionChance(nearbyCompleted, false) > 0.5);
             Add(results, "policy/ordinary cancellation silent", DuelSocialPolicy.ReactionChance(cancelled, true) == 0.0);
             Add(results, "policy/hostile interruption bounded candidate", DuelSocialPolicy.ReactionChance(hostile, true) > 0.0 && DuelSocialPolicy.ReactionChance(hostile, true) < 0.5);
+
+            DuelEventDeduplicator unloadDedup = new DuelEventDeduplicator(6.0);
+            DateTime unloadNow = new DateTime(2026, 8, 13, 6, 0, 0, DateTimeKind.Utc);
+            bool firstUnloadEvent = unloadDedup.TryAccept(accepted, unloadNow);
+            bool duplicateUnloadEvent = unloadDedup.TryAccept(accepted, unloadNow.AddSeconds(1));
+            unloadDedup.Clear();
+            bool afterUnloadReset = unloadDedup.TryAccept(accepted, unloadNow.AddSeconds(2));
+            Add(results, "lifecycle/dedup reset allows a fresh plugin instance",
+                firstUnloadEvent && !duplicateUnloadEvent && afterUnloadReset);
 
             string line;
             Add(results, "template/accept", DuelTemplateRenderer.TryRender(accepted, dancer, null, out line) && Grounded(line, accepted, dancerMemory));

@@ -172,6 +172,14 @@ Deep Sims remains standalone. Current optional integrations include Campmaster, 
 
 `BUILD_AND_INSTALL.ps1` does **not** build sibling mods unless `-BuildCompanionMods` is explicitly supplied.
 
+## Optional Suite Hub integration
+
+Suite Hub is optional. Deep Sims publishes a versioned primitive-only `DeepSimsControlApi`/Aura surface and never references Hub types. Hub may show a coarse enabled/perspective/Ollama status and edit an allowlisted subset of normal player settings. Basic controls are Perspective (MMO/Roleplay), Social expression (Auto/LLM/Templates/Off), Social activity (Adaptive/Quiet/Normal/Lively), autonomous chatter, and party-chat replies. Advanced controls cover existing social/knowledge/runtime toggles plus inference/reasoning routing; developer controls are limited to verbose/seed diagnostics.
+
+API keys, endpoint URLs, raw memories, conversation history, prompts, filesystem paths, and arbitrary command execution are deliberately absent from the Hub setting surface. Changing perspective through Hub uses the same Roleplay state/config path as `/dsroleplay`; it does not bypass the final Roleplay output guard, grounding, quality checks, generation invalidation, or gameplay-authority boundaries.
+
+The pending-Ollama unload/re-enable sequence remains a **live validation requirement**. Source guards alone are not treated as proof that repeated runtime unload/reload is release-ready.
+
 ## Privacy and network behavior
 
 - Ollama defaults to a local endpoint.

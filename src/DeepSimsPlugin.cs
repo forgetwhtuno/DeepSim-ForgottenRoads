@@ -1192,14 +1192,12 @@ namespace ErenshorDeepSims
                             // A departed/ineligible Sim must never deliver a stale private reply.
                             if (fresh == null || !_slots.IsDeepSim(requestSim.Name)) return;
                             string shown = rawReply;
-                            bool guardApplied = false;
                             if (ApplyVanillaTypingConfig.Value)
                             {
                                 string styledPrivate = SimContextReader.ApplyVanillaTypingStyle(fresh, rawReply);
                                 shown = SocialPerspectiveState.RoleplayActive
                                     ? RoleplayPromptContract.KeepSpokenStyle(styledPrivate, rawReply)
                                     : styledPrivate;
-                                guardApplied = SocialPerspectiveState.RoleplayActive && !string.Equals(shown, styledPrivate, StringComparison.Ordinal);
                             }
                             // PersonalizeString can itself operate on vanilla template text. Sanitize again afterwards so
                             // PLAYER/NN/ITEM/II can never leak to the visible Deep Sim response.
@@ -1211,7 +1209,17 @@ namespace ErenshorDeepSims
                                 shown = wiki != null ? RenderUnknownFactReplyForPerspective(userMessage, fresh) : GroundingGuard.SafePrivateFallback(userMessage);
                                 leakFallback = true;
                             }
-                            LogRoleplayDiagnostic("whisper", fresh.Name, whisperUsedTemplate || leakFallback, guardApplied);
+                            // Central Roleplay content guard: the LAST check before a whisper reply is
+                            // ever displayed or stored, catching texture/meta content whether it came
+                            // from the LLM's first draft or from native typing personalization.
+                            bool whisperGuardRan, whisperGuardChanged, whisperGuardRejected;
+                            shown = ApplyRoleplayOutputGuard(shown, fresh.Name, out whisperGuardRan, out whisperGuardChanged, out whisperGuardRejected);
+                            if (whisperGuardRejected)
+                            {
+                                shown = wiki != null ? RenderUnknownFactReplyForPerspective(userMessage, fresh) : GroundingGuard.SafePrivateFallback(userMessage);
+                                leakFallback = true;
+                            }
+                            LogRoleplayDiagnostic("whisper", fresh.Name, whisperUsedTemplate || leakFallback, whisperGuardRan, whisperGuardChanged, whisperGuardRejected);
                             _memory.AddConversation(fresh, userMessage, shown, Math.Max(4, MaxHistoryMessagesConfig.Value));
                             WriteChat(fresh.Name + " tells you: " + shown, GetNativeIncomingWhisperColor());
                         }
@@ -2348,7 +2356,21 @@ namespace ErenshorDeepSims
                             ? "found some headlines but I can't say much more without guessing"
                             : RenderUnknownFactReplyForPerspective(playerMessage, speaker);
                     }
-                    LogRoleplayDiagnostic("group", speaker.Name, groupUsedTemplate, false);
+                    // Central Roleplay content guard: this path (a direct player question answered in
+                    // party chat) previously ran no roleplay-specific check at all -- ApplyRoleplayAutonomousGuard
+                    // only wired into the ambient/autonomous path. This is exactly the path the live log
+                    // showed leaking "online"/"lol"/"heh" with roleplayGuardApplied=False.
+                    bool groupGuardRan, groupGuardChanged, groupGuardRejected;
+                    first = ApplyRoleplayOutputGuard(first, speaker.Name, out groupGuardRan, out groupGuardChanged, out groupGuardRejected);
+                    if (groupGuardRejected)
+                    {
+                        string subjectiveAfterGuard;
+                        groupUsedTemplate = true;
+                        if (PartyReplyIntentClassifier.IsSubjective(replyIntent) && TryRenderSubjectiveReplyForPerspective(playerMessage, speaker, replyIntent, out subjectiveAfterGuard))
+                            first = subjectiveAfterGuard;
+                        else first = RenderUnknownFactReplyForPerspective(playerMessage, speaker);
+                    }
+                    LogRoleplayDiagnostic("group", speaker.Name, groupUsedTemplate, groupGuardRan, groupGuardChanged, groupGuardRejected);
 
                     if (stale()) { NoteStaleDiscard("after-inference", isNewsAnswer ? "news" : null, conversationGeneration); return; }
                     DateTime due = DateTime.UtcNow.AddSeconds(CalculateTypingDelay(first));
@@ -2361,6 +2383,9 @@ namespace ErenshorDeepSims
                         if (!PartyReplyIntentClassifier.IsSubjective(replyIntent) ||
                             !TryRenderSubjectiveReplyForPerspective(playerMessage, speaker, replyIntent, out queueFallback) ||
                             GroundingGuard.IsTooSimilar(first, queueFallback)) return;
+                        bool fallbackGuardRan, fallbackGuardChanged, fallbackGuardRejected;
+                        queueFallback = ApplyRoleplayOutputGuard(queueFallback, speaker.Name, out fallbackGuardRan, out fallbackGuardChanged, out fallbackGuardRejected);
+                        if (fallbackGuardRejected || string.IsNullOrWhiteSpace(queueFallback)) return;
                         due = DateTime.UtcNow.AddSeconds(CalculateTypingDelay(queueFallback));
                         if (!QueueGroupMessage(due, speaker, queueFallback, world, true, false, null, conversationGeneration,
                             isNewsAnswer ? "news" : null)) return;
@@ -2621,6 +2646,12 @@ namespace ErenshorDeepSims
                     reply = TextSanitizer.CleanReply(reply, next.Name, world != null && world.Player != null ? world.Player.Name : null, Math.Max(80, MaxReplyCharactersConfig.Value));
                     reply = await GroundPartyLineAsync(reply, messages, next, memory, world, candidate.VerifiedContext, null, false, string.Empty, null, null, "autonomous").ConfigureAwait(false);
                     reply = ApplyRoleplayAutonomousGuard(reply, candidate == null ? null : candidate.Type, 0, next);
+                    // Central guard runs after the salvage-capable autonomous guard: MetaTerms above
+                    // catches meaning-level leaks (xp/reroll/npc) and salvages via template, but does
+                    // not strip plain typed-chat texture (lol/heh/:D) that can still remain here.
+                    bool eventTailGuardRan, eventTailGuardChanged, eventTailGuardRejected;
+                    reply = ApplyRoleplayOutputGuard(reply, next.Name, out eventTailGuardRan, out eventTailGuardChanged, out eventTailGuardRejected);
+                    LogRoleplayDiagnostic("autonomous", next.Name, false, eventTailGuardRan, eventTailGuardChanged, eventTailGuardRejected);
                 }
                 finally { _inferenceGate.Release(); }
                 if (IsNoMessage(reply)) { stopReason = "NO_MESSAGE/grounding"; break; }
@@ -2734,11 +2765,14 @@ namespace ErenshorDeepSims
                         situation, null, forceMessage, situation, intent, null, forceMessage ? "dstalk" : "autonomous").ConfigureAwait(false);
                     // Roleplay voice guard runs after grounding so it sees the line that would actually
                     // be spoken. MMO perspective passes straight through.
-                    string beforeAutonomousGuard = first;
                     first = ApplyRoleplayAutonomousGuard(first, evt == null ? null : evt.TopicKey,
                         evt == null ? 0 : evt.OpportunityId, speaker);
+                    // Central guard: catches plain typed-chat texture (lol/heh/:D) and reject-core
+                    // out-of-world vocabulary the salvage-capable autonomous guard above does not.
+                    bool autoGuardRan, autoGuardChanged, autoGuardRejected;
+                    first = ApplyRoleplayOutputGuard(first, speaker.Name, out autoGuardRan, out autoGuardChanged, out autoGuardRejected);
                     LogRoleplayDiagnostic(forceMessage ? "dstalk" : "autonomous", speaker.Name, false,
-                        SocialPerspectiveState.RoleplayActive && !string.Equals(first, beforeAutonomousGuard, StringComparison.Ordinal));
+                        autoGuardRan, autoGuardChanged, autoGuardRejected);
                     if (IsNoMessage(first))
                     {
                         if (forceMessage)
@@ -2976,16 +3010,35 @@ namespace ErenshorDeepSims
         }
 
         // Log-only diagnostic (never written to player chat) so a live Lunaris log can prove which
-        // backend actually produced a shown line and whether the Roleplay prompt/guard ran, instead
-        // of only being inferable from the visible text. Fires once per generated/displayed line.
-        private void LogRoleplayDiagnostic(string source, string speakerName, bool usedTemplate, bool roleplayGuardApplied)
+        // backend actually produced a shown line and exactly what the central Roleplay output guard
+        // (RoleplayOutputGuard.Enforce, called through ApplyRoleplayOutputGuard below) did with it,
+        // instead of only being inferable from the visible text. Fires once per generated/displayed
+        // line. The old single roleplayGuardApplied bool was ambiguous between "the guard ran and
+        // changed nothing" and "the guard never ran on this path at all" -- both looked like False.
+        private void LogRoleplayDiagnostic(string source, string speakerName, bool usedTemplate,
+            bool roleplayGuardRan, bool roleplayGuardChanged, bool roleplayGuardRejected)
         {
             Logger.LogInfo("[DeepSims][RoleplayDiag] perspective=" + SocialPerspective.Describe(SocialPerspectiveState.Current) +
                 " expression=" + (usedTemplate ? "Template" : "LLM") +
                 " source=" + (source ?? "unknown") +
                 " speaker=" + (speakerName ?? "?") +
                 " roleplayPromptApplied=" + SocialPerspectiveState.RoleplayActive +
-                " roleplayGuardApplied=" + roleplayGuardApplied);
+                " roleplayGuardRan=" + roleplayGuardRan +
+                " roleplayGuardChanged=" + roleplayGuardChanged +
+                " roleplayGuardRejected=" + roleplayGuardRejected);
+        }
+
+        // THE central Roleplay output enforcement point (Task: central roleplay output guard). Every
+        // path that can put a Roleplay-mode line in front of the player must route the candidate
+        // through this before it is queued/shown. MMO perspective, empty text, and an existing
+        // NO_MESSAGE all pass through untouched with ran=false.
+        private static string ApplyRoleplayOutputGuard(string line, string speakerName, out bool ran, out bool changed, out bool rejected)
+        {
+            ran = false; changed = false; rejected = false;
+            if (!SocialPerspectiveState.RoleplayActive) return line;
+            if (string.IsNullOrWhiteSpace(line) || IsNoMessage(line)) return line;
+            ran = true;
+            return RoleplayOutputGuard.Enforce(line, speakerName, out changed, out rejected);
         }
 
         private async Task<string> GroundPartyLineAsync(string line, List<ChatMessage> messages, SimSnapshot speaker, SimMemory memory,
@@ -3031,7 +3084,15 @@ namespace ErenshorDeepSims
                 reason = "topic mismatch for selected " + intent.TopicKey;
                 Logger.LogDebug("topicMatch rejected source=" + intent.Source + " topic=" + intent.TopicKey + " speaker=" + speaker.Name);
             }
-            if (grounded && externalFacts != null && !IsNoMessage(line))
+            // A subjective/opinion question (e.g. "what do you think about being a windblade?") can
+            // trigger a wiki lookup purely to verify the background fact it's asking about ("what is a
+            // Windblade") while the actual answer is a personal opinion, not a restatement of the wiki
+            // text. Holding an opinion to "supported by the retrieved game facts" collapsed every such
+            // turn into the unknown-fact template even when the underlying identity fact WAS verified
+            // (see PromptBuilder's identity-vs-asked-class cross reference). Knowledge-mode grounding
+            // stays authoritative for factual questions; it is not the right gate for opinions.
+            bool skipKnowledgeGroundingForSubjectiveOpinion = directReplyIntent.HasValue && PartyReplyIntentClassifier.IsSubjective(directReplyIntent.Value);
+            if (grounded && externalFacts != null && !IsNoMessage(line) && !skipKnowledgeGroundingForSubjectiveOpinion)
             {
                 string knowledgeReason;
                 if (!GroundingGuard.IsKnowledgeModeGrounded(line, memory, world, externalFacts, out knowledgeReason))
@@ -3072,7 +3133,7 @@ namespace ErenshorDeepSims
                     retryGrounded = false;
                     retryReason = "topic mismatch for selected " + intent.TopicKey;
                 }
-                if (retryGrounded && externalFacts != null)
+                if (retryGrounded && externalFacts != null && !skipKnowledgeGroundingForSubjectiveOpinion)
                 {
                     string knowledgeRetryReason;
                     if (!GroundingGuard.IsKnowledgeModeGrounded(retry, memory, world, externalFacts, out knowledgeRetryReason))
@@ -3102,7 +3163,13 @@ namespace ErenshorDeepSims
                         TryRenderSubjectiveReplyForPerspective(fallbackSource, speaker, directReplyIntent.Value, out subjective))
                         line = subjective;
                     else line = externalFacts != null ? RenderUnknownFactReplyForPerspective(fallbackSource, speaker) : "NO_MESSAGE";
-                    if (!IsNoMessage(line)) LogRoleplayDiagnostic(diagnosticSource, speaker == null ? null : speaker.Name, true, false);
+                    if (!IsNoMessage(line))
+                    {
+                        bool fbGuardRan, fbGuardChanged, fbGuardRejected;
+                        line = ApplyRoleplayOutputGuard(line, speaker == null ? null : speaker.Name, out fbGuardRan, out fbGuardChanged, out fbGuardRejected);
+                        LogRoleplayDiagnostic(diagnosticSource, speaker == null ? null : speaker.Name, true, fbGuardRan, fbGuardChanged, fbGuardRejected);
+                        if (fbGuardRejected) line = "NO_MESSAGE";
+                    }
                 }
             }
             if (GroundingGuard.HasInstructionLeak(line)) return "NO_MESSAGE";
@@ -3416,6 +3483,23 @@ namespace ErenshorDeepSims
             // deferred until FlushScheduledGroupMessages runs on Unity's main thread.
             if (_requestStopping) return false; // shutdown began; never enqueue a new visible line
             if (_groupMessages == null || sim == null || string.IsNullOrWhiteSpace(rawText) || IsNoMessage(rawText)) return false;
+
+            // Blanket central-guard safety net: every group-visible line, from every producer (LLM,
+            // deterministic template, event thread, vanilla continuation), funnels through here before
+            // being enqueued. Call sites that already ran RoleplayOutputGuard.Enforce earlier (to get a
+            // source-labeled diagnostic line and a perspective-correct fallback on rejection) simply see
+            // an already-clean candidate here and this is a no-op; call sites that do not run it
+            // individually are still fully covered.
+            if (SocialPerspectiveState.RoleplayActive)
+            {
+                bool netChanged, netRejected;
+                rawText = RoleplayOutputGuard.Enforce(rawText, sim.Name, out netChanged, out netRejected);
+                if (netRejected || IsNoMessage(rawText))
+                {
+                    Logger.LogDebug("Suppressed group line at central roleplay guard: source=" + (socialType ?? "reply") + ", speaker=" + sim.Name);
+                    return false;
+                }
+            }
             string qualityReason;
             bool malformed = ReplyCompletenessGuard.IsIncomplete(rawText, out qualityReason);
             if (!malformed) malformed = ReplyCompletenessGuard.IsOverlong(rawText, 24, 220, out qualityReason);
@@ -3537,6 +3621,21 @@ namespace ErenshorDeepSims
                 {
                     Logger.LogWarning("Blocked prompt/instruction leak at group-chat output boundary from " + line.Speaker + ": " + shown);
                     continue;
+                }
+                // Absolute last-chance central Roleplay guard: PersonalizeString and CleanReply both run
+                // after every earlier guard, so this is the literal final point before a line becomes
+                // visible. QueueGroupMessage already ran the same guard before enqueueing; this call is
+                // near-always a no-op there, and only does real work when personalization reintroduced
+                // texture.
+                if (SocialPerspectiveState.RoleplayActive)
+                {
+                    bool finalGuardChanged, finalGuardRejected;
+                    shown = RoleplayOutputGuard.Enforce(shown, line.Speaker, out finalGuardChanged, out finalGuardRejected);
+                    if (finalGuardRejected || IsNoMessage(shown))
+                    {
+                        Logger.LogWarning("Blocked roleplay-guard-rejected line at final group-chat output boundary from " + line.Speaker);
+                        continue;
+                    }
                 }
                 string finalQualityReason;
                 bool finalMalformed = ReplyCompletenessGuard.IsIncomplete(shown, out finalQualityReason) ||

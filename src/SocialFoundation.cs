@@ -174,6 +174,18 @@ namespace ErenshorDeepSims
                 return PartyReplyIntent.Preference;
             if (m.IndexOf("last time", StringComparison.Ordinal) >= 0 || m.IndexOf("remember", StringComparison.Ordinal) >= 0)
                 return PartyReplyIntent.VerifiedHistoryQuestion;
+            // Subjective-opinion phrasing must win over the generic factual-lookup check below. A
+            // question like "what do you think about being a windblade?" mentions a class name (which
+            // trips KnowledgeQueryClassifier.ShouldLookup's class+question-word heuristic) but is asking
+            // for an OPINION about a fact, not the fact itself; classifying it FactualGameQuestion routed
+            // it into wiki-relationship grounding that an opinion can never satisfy, collapsing it into
+            // the unknown-fact fallback even when the underlying identity fact was fully verified.
+            if (m.IndexOf("what do you think", StringComparison.Ordinal) >= 0 ||
+                m.IndexOf("do you like", StringComparison.Ordinal) >= 0 ||
+                m.IndexOf("favorite", StringComparison.Ordinal) >= 0 ||
+                m.IndexOf("favourite", StringComparison.Ordinal) >= 0 ||
+                m.IndexOf("your opinion", StringComparison.Ordinal) >= 0)
+                return PartyReplyIntent.Opinion;
             if (KnowledgeQueryClassifier.ShouldLookup(message) || ExternalNewsQueryClassifier.ShouldLookup(message) ||
                 m.IndexOf("latest patch", StringComparison.Ordinal) >= 0 ||
                 m.IndexOf("newest patch", StringComparison.Ordinal) >= 0 ||
@@ -181,12 +193,6 @@ namespace ErenshorDeepSims
                 m.IndexOf("latest update", StringComparison.Ordinal) >= 0 ||
                 m.IndexOf("newest update", StringComparison.Ordinal) >= 0)
                 return PartyReplyIntent.FactualGameQuestion;
-            if (m.IndexOf("what do you think", StringComparison.Ordinal) >= 0 ||
-                m.IndexOf("do you like", StringComparison.Ordinal) >= 0 ||
-                m.IndexOf("favorite", StringComparison.Ordinal) >= 0 ||
-                m.IndexOf("favourite", StringComparison.Ordinal) >= 0 ||
-                m.IndexOf("your opinion", StringComparison.Ordinal) >= 0)
-                return PartyReplyIntent.Opinion;
             return PartyReplyIntent.SocialBanter;
         }
 

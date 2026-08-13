@@ -28,6 +28,8 @@ namespace ErenshorDeepSims
                 SpokenStyleTests(r);
                 AffinityPromptTests(r);
                 DirectReplyFallbackTests(r);
+                OutputGuardTests(r);
+                IdentityRoutingTests(r);
             }
             finally { SocialPerspectiveState.Current = saved; RoleplayFactionContext.Clear(); }
             return r;
@@ -680,6 +682,96 @@ namespace ErenshorDeepSims
             // MMO perspective is untouched by this fix: SocialTemplates' fillers are unchanged.
             string mmoUnknown = SocialTemplates.RenderUnknownFactReply("heard any news?", sim);
             Add(r, "MMO unknown-fact fallback is unchanged", !string.IsNullOrWhiteSpace(mmoUnknown));
+        }
+
+        // ---- central RoleplayOutputGuard: exact live-log regression lines ------------------------
+        // Every one of these was displayed to the player live with roleplayGuardApplied=False before
+        // the central guard (RoleplayOutputGuard.Enforce, wired into QueueGroupMessage/whisper/final
+        // display in DeepSimsPlugin) existed. None may survive unchanged now, whether by stripping
+        // texture (chat abbreviations, emoticons) or by full rejection of un-fixable core content
+        // (e.g. "online" is the claim itself, not decoration on it).
+        private static void OutputGuardTests(List<string> r)
+        {
+            string[] liveRegressionLines = new string[]
+            {
+                "nice to see you online again",
+                "are your eyes painted on or playing NES? lmao",
+                "heh yooo Brinon! aloha",
+                "lmao maybe we're just too quiet to hear our own footsteps? :D",
+                "Hey pal, nice to see you online again! Hit me up if you wanna hang.",
+                "It's quiet in Hidden... heh :D just peace for now lol"
+            };
+            for (int i = 0; i < liveRegressionLines.Length; i++)
+            {
+                bool changed, rejected;
+                string result = RoleplayOutputGuard.Enforce(liveRegressionLines[i], "Dancer", out changed, out rejected);
+                bool survivedUnchanged = string.Equals(result, liveRegressionLines[i], StringComparison.Ordinal);
+                Add(r, "live regression line is not shown unchanged: \"" + liveRegressionLines[i] + "\"", !survivedUnchanged);
+                Add(r, "live regression line reports ran/changed-or-rejected: \"" + liveRegressionLines[i] + "\"", changed || rejected);
+            }
+
+            // Core-content vocabulary (online/offline/server/session/NES/etc.) is unfixable by
+            // stripping a single token, so it must fully reject rather than leave a mangled sentence.
+            bool onlineChanged, onlineRejected;
+            string onlineResult = RoleplayOutputGuard.Enforce("nice to see you online again", "Dancer", out onlineChanged, out onlineRejected);
+            Add(r, "core out-of-world vocabulary is rejected, not partially stripped", onlineRejected && onlineResult == "NO_MESSAGE");
+
+            // Plain typed-chat texture (lol/heh/:D) is stripped in place; the sentence survives.
+            bool textureChanged, textureRejected;
+            string textureResult = RoleplayOutputGuard.Enforce("Quiet here lol", "Dancer", out textureChanged, out textureRejected);
+            Add(r, "plain chat texture is stripped, not rejected", !textureRejected && textureChanged && textureResult.IndexOf("lol", StringComparison.OrdinalIgnoreCase) < 0);
+
+            // A clean line survives byte-identical with ran/changed both false.
+            bool cleanChanged, cleanRejected;
+            string cleanResult = RoleplayOutputGuard.Enforce("Stay sharp.", "Dancer", out cleanChanged, out cleanRejected);
+            Add(r, "clean RP line survives the central guard untouched", cleanResult == "Stay sharp." && !cleanChanged && !cleanRejected);
+
+            // NO_MESSAGE is left alone, never turned into a rejection or new speech.
+            bool noMsgChanged, noMsgRejected;
+            string noMsgResult = RoleplayOutputGuard.Enforce("NO_MESSAGE", "Dancer", out noMsgChanged, out noMsgRejected);
+            Add(r, "NO_MESSAGE passes through the central guard untouched", noMsgResult == "NO_MESSAGE" && !noMsgChanged && !noMsgRejected);
+
+            // Third-person self-narration is caught by the central guard too (not only the older
+            // autonomous-only ViolatesRoleplayVoice boundary).
+            bool narrationChanged, narrationRejected;
+            RoleplayOutputGuard.Enforce("Dancer smiles.", "Dancer", out narrationChanged, out narrationRejected);
+            Add(r, "central guard rejects self-narration", narrationRejected);
+        }
+
+        // ---- identity-aware routing: verified class fact vs. subjective opinion question ----------
+        private static void IdentityRoutingTests(List<string> r)
+        {
+            // "what do you think about being a windblade?" is a subjective opinion question about the
+            // speaker's own (potentially verified) identity, not an ungroundable factual claim. It must
+            // classify as subjective so the caller-side routing (DeepSimsPlugin.GroundPartyLineAsync's
+            // skipKnowledgeGroundingForSubjectiveOpinion) can exempt it from wiki-relationship grounding.
+            PartyReplyIntent classified = PartyReplyIntentClassifier.Classify("dancer what do you think about being a windblade?");
+            Add(r, "'what do you think about being X' classifies as Opinion", classified == PartyReplyIntent.Opinion);
+            Add(r, "'what do you think about being X' is subjective", PartyReplyIntentClassifier.IsSubjective(classified));
+
+            // PromptBuilder's identity-vs-asked-class cross reference: when the wiki lookup target is a
+            // known class name, the system prompt must state plainly whether the speaker's OWN verified
+            // class matches it, rather than leaving the model to guess between falsely claiming
+            // membership and falsely denying knowledge of its own class.
+            SimSnapshot windbladeSim = new SimSnapshot();
+            windbladeSim.Name = "Dancer";
+            windbladeSim.ClassName = "Windblade";
+            WikiResult windbladeWiki = new WikiResult { Query = "windblade", Title = "Windblade", Extract = "Windblades are agile melee duelists.", Found = true, SourceLabel = "Erenshor community wiki" };
+            List<ConversationLine> thread = new List<ConversationLine>();
+            thread.Add(new ConversationLine("Player", "dancer what do you think about being a windblade?"));
+            string matchPrompt = Flatten(PromptBuilder.BuildPartyThreadReply(windbladeSim, new SimMemory(), new WorldSnapshot(), thread, 1, windbladeWiki));
+            Add(r, "identity cross-reference fires for a known class lookup", matchPrompt.IndexOf("VERIFIED IDENTITY VS ASKED CLASS", StringComparison.Ordinal) >= 0);
+            Add(r, "matching verified class tells the model it may answer as itself",
+                matchPrompt.IndexOf("you may answer as yourself about being one", StringComparison.OrdinalIgnoreCase) >= 0);
+
+            SimSnapshot druidSim = new SimSnapshot();
+            druidSim.Name = "Dancer";
+            druidSim.ClassName = "Druid";
+            string mismatchPrompt = Flatten(PromptBuilder.BuildPartyThreadReply(druidSim, new SimMemory(), new WorldSnapshot(), thread, 1, windbladeWiki));
+            Add(r, "mismatched verified class tells the model to correct the premise",
+                mismatchPrompt.IndexOf("correct that premise naturally", StringComparison.OrdinalIgnoreCase) >= 0);
+            Add(r, "mismatched verified class forbids claiming membership",
+                mismatchPrompt.IndexOf("do not claim to be a windblade", StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
         private static bool SetAndCheck(string name, RoleplayFactionAttitude attitude)

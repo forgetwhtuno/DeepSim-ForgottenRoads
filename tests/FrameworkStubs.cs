@@ -72,5 +72,16 @@ namespace ErenshorDeepSims
 
         internal static string DescribeTyping(SimSnapshot sim) { return "normal chat"; }
         internal static string DescribeHardOutputStyle(SimSnapshot sim) { return "short party chat"; }
+
+        // Mirrors the real SimContextReader.NormalizeClassName (legacy "Duelist" -> current
+        // "Windblade" terminology) so PromptBuilder's identity-vs-asked-class cross reference is
+        // testable in the standalone harness without pulling in the Unity-dependent reader.
+        internal static string NormalizeClassName(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return "unknown class";
+            string clean = value.Trim();
+            if (string.Equals(clean, "Duelist", System.StringComparison.OrdinalIgnoreCase)) return "Windblade";
+            return clean;
+        }
     }
 }

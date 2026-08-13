@@ -164,6 +164,30 @@ namespace ErenshorDeepSims
             return ChatTexture.IsMatch(text);
         }
 
+        // Strips typed-chat texture from ANYWHERE in a line, not only texture newly introduced by
+        // native personalization (see KeepSpokenStyle). Used by RoleplayOutputGuard so an LLM/template
+        // line that already contains "lol"/"heh"/":D" in its first draft gets the same salvage
+        // treatment as one where the game's own typing style appended it afterward.
+        internal static string StripChatTexture(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return text;
+            if (!ChatTexture.IsMatch(text)) return text;
+            string result = ChatTexture.Replace(text, delegate(Match m)
+            {
+                string val = m.Value;
+                if (val.Length > 0)
+                {
+                    char last = val[val.Length - 1];
+                    if (last == '.' || last == '!' || last == '?') return last.ToString();
+                }
+                return " ";
+            });
+            result = Regex.Replace(result, @"\s{2,}", " ");
+            result = Regex.Replace(result, @"\s+([.,!?])", "$1");
+            result = Regex.Replace(result, @"^[.,!?\s]+", "");
+            return result.Trim();
+        }
+
         // Applied to the result of native typing personalization in Roleplay only. Harmless native
         // traits (casing, punctuation shape, typos, third-person quirks) are kept; if the transform
         // introduced typed-chat texture that the accepted line did not have, the accepted line wins.
@@ -220,6 +244,116 @@ namespace ErenshorDeepSims
             }
             return false;
         }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // CENTRAL ROLEPLAY OUTPUT GUARD
+    // ------------------------------------------------------------------------------------------
+    // RoleplayPromptContract.ViolatesRoleplayVoice/MetaTerms only fires its full meta-vocabulary
+    // check when the caller marks a line "autonomous" -- correct for the ambient/autonomous path,
+    // because a directly-asked mechanics question is allowed to use real game words. But that same
+    // narrow trigger meant every DIRECTLY-ADDRESSED emission path (group replies, whisper, thread
+    // continuations, verified-event reactions) never ran ANY roleplay-specific content check at all,
+    // so live MMO/internet-chat texture ("online", "hit me up", "lol", "heh", ":D") reached the
+    // player unfiltered while the diagnostic log reported roleplayGuardApplied=False.
+    //
+    // This is the ONE function every Roleplay-mode emission path must run immediately before a line
+    // is queued/shown, regardless of which backend produced it (LLM first try, LLM retry, deterministic
+    // template, event-thread reply). It is content-focused, not merely a "sounds spoken" style pass:
+    // KeepSpokenStyle only reverts texture that PersonalizeString newly introduced after acceptance;
+    // this guard also catches texture and out-of-world vocabulary present in the FIRST draft.
+    //
+    // Two tiers:
+    //   1. Texture (RoleplayPromptContract.ChatTexture) - stripped in place; the sentence survives.
+    //   2. Core-content meta vocabulary (RejectCoreWords/RejectCorePhrases) - the CONCEPT itself is
+    //      out-of-world and cannot be safely reworded by deleting a token (e.g. "online" is not
+    //      texture on a sentence, it IS the sentence's claim), so the whole candidate is rejected.
+    // Stage direction and third-person self-narration reuse the existing detectors and are rejected
+    // outright (Erenshor Sims cannot narrate their own actions, and there is no safe partial fix).
+    internal static class RoleplayOutputGuard
+    {
+        // Data, not scattered logic: extend these arrays to teach the guard a new out-of-world
+        // concept. Word entries are matched with \b boundaries; phrase entries match with flexible
+        // internal whitespace. Kept deliberately narrow and perspective-specific -- the same words
+        // are legitimate in MMO perspective and in direct mechanics answers, neither of which this
+        // guard runs against (see ApplyRoleplayAutonomousGuard/GroundPartyLineAsync callers).
+        internal static readonly string[] RejectCoreWords = new string[]
+        {
+            "game", "server", "session", "online", "offline", "dps", "player",
+            "nes", "playstation", "xbox", "nintendo", "wifi", "internet", "discord", "steam"
+        };
+
+        internal static readonly string[] RejectCorePhrases = new string[]
+        {
+            "hit me up", "add me", "friend request",
+            "log in", "log out", "logged in", "logged out", "logging in", "logging out",
+            "my character", "your character", "this character"
+        };
+
+        private static readonly Regex RejectCoreRegex = BuildRejectRegex();
+
+        private static Regex BuildRejectRegex()
+        {
+            List<string> parts = new List<string>();
+            for (int i = 0; i < RejectCoreWords.Length; i++)
+                parts.Add(@"\b" + Regex.Escape(RejectCoreWords[i]) + @"\b");
+            for (int i = 0; i < RejectCorePhrases.Length; i++)
+                parts.Add(Regex.Escape(RejectCorePhrases[i]).Replace(" ", @"\s+"));
+            return new Regex(string.Join("|", parts.ToArray()), RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        }
+
+        internal static bool ContainsRejectableCore(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return false;
+            return RejectCoreRegex.IsMatch(text);
+        }
+
+        internal const string Rejected = "NO_MESSAGE";
+
+        // Runs the whole boundary. `changed` is true when the text was altered but survived (texture
+        // stripped, stage direction removed); `rejected` is true when nothing safe could be salvaged
+        // and the caller must fall back to silence or a separate deterministic line. Only ever called
+        // while Roleplay is active -- MMO perspective never reaches this function.
+        internal static string Enforce(string candidate, string speakerName, out bool changed, out bool rejected)
+        {
+            changed = false;
+            rejected = false;
+            if (string.IsNullOrWhiteSpace(candidate)) return candidate;
+            string trimmed = candidate.Trim();
+            if (string.Equals(trimmed, "NO_MESSAGE", StringComparison.OrdinalIgnoreCase)) return candidate;
+
+            // Core out-of-world content: not fixable by deleting a word, reject the whole line.
+            if (ContainsRejectableCore(candidate) ||
+                RoleplayPromptContract.ContainsSelfNarration(candidate, speakerName))
+            {
+                rejected = true;
+                return Rejected;
+            }
+
+            string working = candidate;
+
+            if (RoleplayPromptContract.ContainsStageDirection(working))
+            {
+                string withoutStageDirection = StageDirectionOnly.Replace(working, " ");
+                withoutStageDirection = Regex.Replace(withoutStageDirection, @"\s{2,}", " ").Trim();
+                if (string.IsNullOrWhiteSpace(withoutStageDirection)) { rejected = true; return Rejected; }
+                working = withoutStageDirection;
+            }
+
+            string stripped = RoleplayPromptContract.StripChatTexture(working);
+            if (!string.Equals(stripped, working, StringComparison.Ordinal)) working = stripped;
+
+            if (string.IsNullOrWhiteSpace(working)) { rejected = true; return Rejected; }
+
+            changed = !string.Equals(working, candidate, StringComparison.Ordinal);
+            return working;
+        }
+
+        // Mirrors RoleplayPromptContract's stage-direction detector but is used destructively here
+        // (removal) rather than only as a yes/no gate.
+        private static readonly Regex StageDirectionOnly = new Regex(
+            @"(\*[^*]{1,80}\*)|(\[[^\]]{1,80}\])|(<[^>]{1,80}>)",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
     }
 
     // ------------------------------------------------------------------------------------------

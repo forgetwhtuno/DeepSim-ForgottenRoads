@@ -998,6 +998,10 @@ namespace ErenshorDeepSims
                 guardResults.AddRange(PvpEventBridge.RunSelfTests());
 #endif
                 guardResults.AddRange(DeterministicRegressionTests.Run());
+                // Was previously written but never wired into the self-test command, so a regression
+                // in Roleplay perspective behavior (identity block, thread rules, direct-reply
+                // fallback, spoken-style filter) could pass unnoticed by anyone running /dsguardtest.
+                guardResults.AddRange(RoleplayDeterministicTests.RunSelfTests());
                 for (int i = 0; i < guardResults.Count; i++) WriteChat(guardResults[i], "lightblue");
                 return true;
             }
@@ -1164,16 +1168,17 @@ namespace ErenshorDeepSims
                         string leakRetry = await TimedChatAsync(messages);
                         if (stale()) return;
                         leakRetry = TextSanitizer.CleanReply(leakRetry, requestSim.Name, world != null && world.Player != null ? world.Player.Name : null, Math.Max(80, MaxReplyCharactersConfig.Value));
-                        reply = GroundingGuard.HasInstructionLeak(leakRetry) ? (wiki != null ? SocialTemplates.RenderUnknownFactReply(userMessage, requestSim) : GroundingGuard.SafePrivateFallback(userMessage)) : leakRetry;
+                        reply = GroundingGuard.HasInstructionLeak(leakRetry) ? (wiki != null ? RenderUnknownFactReplyForPerspective(userMessage, requestSim) : GroundingGuard.SafePrivateFallback(userMessage)) : leakRetry;
                     }
                     // Private replies use the same grounding boundary as group chat. Previously this
                     // ran only when no wiki/news result existed, which left the knowledge-mode answers
                     // â€” the ones most likely to invent drop tables, vendors, or personal history â€”
                     // completely unguarded. forceMessage is true because the player asked directly.
                     reply = await GroundPartyLineAsync(reply, messages, requestSim, memory, world, null, wiki, true, userMessage,
-                        null, PartyReplyIntentClassifier.Classify(userMessage)).ConfigureAwait(false);
+                        null, PartyReplyIntentClassifier.Classify(userMessage), "whisper").ConfigureAwait(false);
                     if (stale()) return;
-                    if (IsNoMessage(reply)) reply = wiki != null ? SocialTemplates.RenderUnknownFactReply(userMessage, requestSim) : GroundingGuard.SafePrivateFallback(userMessage);
+                    bool whisperUsedTemplate = IsNoMessage(reply);
+                    if (whisperUsedTemplate) reply = wiki != null ? RenderUnknownFactReplyForPerspective(userMessage, requestSim) : GroundingGuard.SafePrivateFallback(userMessage);
                     if (string.IsNullOrWhiteSpace(reply)) reply = "...think my chat ate that.";
                     string rawReply = reply;
 
@@ -1187,21 +1192,26 @@ namespace ErenshorDeepSims
                             // A departed/ineligible Sim must never deliver a stale private reply.
                             if (fresh == null || !_slots.IsDeepSim(requestSim.Name)) return;
                             string shown = rawReply;
+                            bool guardApplied = false;
                             if (ApplyVanillaTypingConfig.Value)
                             {
                                 string styledPrivate = SimContextReader.ApplyVanillaTypingStyle(fresh, rawReply);
                                 shown = SocialPerspectiveState.RoleplayActive
                                     ? RoleplayPromptContract.KeepSpokenStyle(styledPrivate, rawReply)
                                     : styledPrivate;
+                                guardApplied = SocialPerspectiveState.RoleplayActive && !string.Equals(shown, styledPrivate, StringComparison.Ordinal);
                             }
                             // PersonalizeString can itself operate on vanilla template text. Sanitize again afterwards so
                             // PLAYER/NN/ITEM/II can never leak to the visible Deep Sim response.
                             shown = TextSanitizer.CleanReply(shown, fresh.Name, world != null && world.Player != null ? world.Player.Name : null, Math.Max(80, MaxReplyCharactersConfig.Value));
+                            bool leakFallback = false;
                             if (GroundingGuard.HasInstructionLeak(shown))
                             {
                                 Logger.LogWarning("Blocked prompt/instruction leak at private-chat output boundary from " + fresh.Name + ": " + shown);
-                                shown = wiki != null ? SocialTemplates.RenderUnknownFactReply(userMessage, fresh) : GroundingGuard.SafePrivateFallback(userMessage);
+                                shown = wiki != null ? RenderUnknownFactReplyForPerspective(userMessage, fresh) : GroundingGuard.SafePrivateFallback(userMessage);
+                                leakFallback = true;
                             }
+                            LogRoleplayDiagnostic("whisper", fresh.Name, whisperUsedTemplate || leakFallback, guardApplied);
                             _memory.AddConversation(fresh, userMessage, shown, Math.Max(4, MaxHistoryMessagesConfig.Value));
                             WriteChat(fresh.Name + " tells you: " + shown, GetNativeIncomingWhisperColor());
                         }
@@ -2322,7 +2332,8 @@ namespace ErenshorDeepSims
                     string first = await TimedChatAsync(messages);
                     first = TextSanitizer.CleanReply(first, speaker.Name, playerName, Math.Max(80, MaxReplyCharactersConfig.Value));
                     first = await GroundPartyLineAsync(first, messages, speaker, speakerMemory, world, null, wiki, forceResponse, playerMessage,
-                        null, replyIntent).ConfigureAwait(false);
+                        null, replyIntent, "group").ConfigureAwait(false);
+                    bool groupUsedTemplate = false;
                     if (IsNoMessage(first))
                     {
                         SetResponseStatus("rejected", "no grounded first reply survived");
@@ -2330,12 +2341,14 @@ namespace ErenshorDeepSims
                         // A successful news bundle should never silently collapse into a vague deflection;
                         // prefer a bounded honest failure line that still references the lookup outcome.
                         string subjectiveFallback;
-                        if (PartyReplyIntentClassifier.IsSubjective(replyIntent) && SocialTemplates.TryRenderSubjectiveReply(playerMessage, speaker, replyIntent, out subjectiveFallback))
+                        groupUsedTemplate = true;
+                        if (PartyReplyIntentClassifier.IsSubjective(replyIntent) && TryRenderSubjectiveReplyForPerspective(playerMessage, speaker, replyIntent, out subjectiveFallback))
                             first = subjectiveFallback;
                         else first = isNewsAnswer && wiki != null && wiki.Found
                             ? "found some headlines but I can't say much more without guessing"
-                            : SocialTemplates.RenderUnknownFactReply(playerMessage, speaker);
+                            : RenderUnknownFactReplyForPerspective(playerMessage, speaker);
                     }
+                    LogRoleplayDiagnostic("group", speaker.Name, groupUsedTemplate, false);
 
                     if (stale()) { NoteStaleDiscard("after-inference", isNewsAnswer ? "news" : null, conversationGeneration); return; }
                     DateTime due = DateTime.UtcNow.AddSeconds(CalculateTypingDelay(first));
@@ -2346,7 +2359,7 @@ namespace ErenshorDeepSims
                         if (!forceResponse) return;
                         string queueFallback;
                         if (!PartyReplyIntentClassifier.IsSubjective(replyIntent) ||
-                            !SocialTemplates.TryRenderSubjectiveReply(playerMessage, speaker, replyIntent, out queueFallback) ||
+                            !TryRenderSubjectiveReplyForPerspective(playerMessage, speaker, replyIntent, out queueFallback) ||
                             GroundingGuard.IsTooSimilar(first, queueFallback)) return;
                         due = DateTime.UtcNow.AddSeconds(CalculateTypingDelay(queueFallback));
                         if (!QueueGroupMessage(due, speaker, queueFallback, world, true, false, null, conversationGeneration,
@@ -2606,7 +2619,7 @@ namespace ErenshorDeepSims
                     List<ChatMessage> messages = PromptBuilder.BuildVerifiedEventThread(next, world, candidate, thread, generated + 2);
                     reply = await TimedChatAsync(messages);
                     reply = TextSanitizer.CleanReply(reply, next.Name, world != null && world.Player != null ? world.Player.Name : null, Math.Max(80, MaxReplyCharactersConfig.Value));
-                    reply = await GroundPartyLineAsync(reply, messages, next, memory, world, candidate.VerifiedContext, null, false, string.Empty).ConfigureAwait(false);
+                    reply = await GroundPartyLineAsync(reply, messages, next, memory, world, candidate.VerifiedContext, null, false, string.Empty, null, null, "autonomous").ConfigureAwait(false);
                     reply = ApplyRoleplayAutonomousGuard(reply, candidate == null ? null : candidate.Type, 0, next);
                 }
                 finally { _inferenceGate.Release(); }
@@ -2718,11 +2731,14 @@ namespace ErenshorDeepSims
                         world != null && world.Player != null ? world.Player.Name : null,
                         Math.Max(80, MaxReplyCharactersConfig.Value));
                     first = await GroundPartyLineAsync(first, messages, speaker, speakerMemory, world,
-                        situation, null, forceMessage, situation, intent).ConfigureAwait(false);
+                        situation, null, forceMessage, situation, intent, null, forceMessage ? "dstalk" : "autonomous").ConfigureAwait(false);
                     // Roleplay voice guard runs after grounding so it sees the line that would actually
                     // be spoken. MMO perspective passes straight through.
+                    string beforeAutonomousGuard = first;
                     first = ApplyRoleplayAutonomousGuard(first, evt == null ? null : evt.TopicKey,
                         evt == null ? 0 : evt.OpportunityId, speaker);
+                    LogRoleplayDiagnostic(forceMessage ? "dstalk" : "autonomous", speaker.Name, false,
+                        SocialPerspectiveState.RoleplayActive && !string.Equals(first, beforeAutonomousGuard, StringComparison.Ordinal));
                     if (IsNoMessage(first))
                     {
                         if (forceMessage)
@@ -2942,9 +2958,39 @@ namespace ErenshorDeepSims
             Logger.LogWarning("Ollama unavailable; Deep Sims will fall back to vanilla chat for " + cooldown + " seconds: " + detail);
         }
 
+        // Perspective-aware substitutes for SocialTemplates' MMO-flavored deterministic fillers.
+        // The autonomous path already refuses to show an MMO template while Roleplay is active
+        // (RoleplayExpressionRouter); these two dispatch points give the directly-addressed reply
+        // path (party chat, whisper) the same guarantee at its own fallback boundary.
+        private static string RenderUnknownFactReplyForPerspective(string playerMessage, SimSnapshot speaker)
+        {
+            return SocialPerspectiveState.RoleplayActive
+                ? RoleplayFallback.RenderUnknownFact(playerMessage, speaker)
+                : SocialTemplates.RenderUnknownFactReply(playerMessage, speaker);
+        }
+
+        private static bool TryRenderSubjectiveReplyForPerspective(string playerMessage, SimSnapshot speaker, PartyReplyIntent intent, out string message)
+        {
+            if (SocialPerspectiveState.RoleplayActive) return RoleplayFallback.TryRenderSubjective(playerMessage, speaker, out message);
+            return SocialTemplates.TryRenderSubjectiveReply(playerMessage, speaker, intent, out message);
+        }
+
+        // Log-only diagnostic (never written to player chat) so a live Lunaris log can prove which
+        // backend actually produced a shown line and whether the Roleplay prompt/guard ran, instead
+        // of only being inferable from the visible text. Fires once per generated/displayed line.
+        private void LogRoleplayDiagnostic(string source, string speakerName, bool usedTemplate, bool roleplayGuardApplied)
+        {
+            Logger.LogInfo("[DeepSims][RoleplayDiag] perspective=" + SocialPerspective.Describe(SocialPerspectiveState.Current) +
+                " expression=" + (usedTemplate ? "Template" : "LLM") +
+                " source=" + (source ?? "unknown") +
+                " speaker=" + (speakerName ?? "?") +
+                " roleplayPromptApplied=" + SocialPerspectiveState.RoleplayActive +
+                " roleplayGuardApplied=" + roleplayGuardApplied);
+        }
+
         private async Task<string> GroundPartyLineAsync(string line, List<ChatMessage> messages, SimSnapshot speaker, SimMemory memory,
             WorldSnapshot world, string verifiedSituation, WikiResult externalFacts, bool forceMessage, string fallbackSource,
-            SocialIntent intent = null, PartyReplyIntent? directReplyIntent = null)
+            SocialIntent intent = null, PartyReplyIntent? directReplyIntent = null, string diagnosticSource = "reply")
         {
             // Retrieved wiki/news text is a source document's wording, not a verified in-session
             // observation. It must never be folded into groundingCorpus as "VERIFIED" evidence that
@@ -3044,7 +3090,20 @@ namespace ErenshorDeepSims
                 // A successful news bundle must never fall back to a generic "not sure on that one" -
                 // that erases a real, useful lookup result. Prefer a bounded honest failure line instead.
                 else if (isExternalNewsAnswer) line = "found some headlines but I can't say much more without guessing";
-                else line = externalFacts != null ? SocialTemplates.RenderUnknownFactReply(fallbackSource, speaker) : "NO_MESSAGE";
+                else
+                {
+                    // A subjective/opinion question (e.g. "what do you think about being a windblade?")
+                    // rejected as an uncertainty deflection deserves an opinionated fallback, not the
+                    // factual "I don't know" template -- this is the same distinction the caller above
+                    // makes for its own fallback, kept consistent here since this substitution happens
+                    // first and usually pre-empts that caller-level check entirely.
+                    string subjective;
+                    if (directReplyIntent.HasValue && PartyReplyIntentClassifier.IsSubjective(directReplyIntent.Value) &&
+                        TryRenderSubjectiveReplyForPerspective(fallbackSource, speaker, directReplyIntent.Value, out subjective))
+                        line = subjective;
+                    else line = externalFacts != null ? RenderUnknownFactReplyForPerspective(fallbackSource, speaker) : "NO_MESSAGE";
+                    if (!IsNoMessage(line)) LogRoleplayDiagnostic(diagnosticSource, speaker == null ? null : speaker.Name, true, false);
+                }
             }
             if (GroundingGuard.HasInstructionLeak(line)) return "NO_MESSAGE";
 
@@ -3065,7 +3124,10 @@ namespace ErenshorDeepSims
                 {
                     Logger.LogDebug("reply_quality=reject reason=" + qualityReason);
                     Logger.LogDebug("reply_quality=retry");
-                    messages.Add(new ChatMessage("user", "Rewrite the whole thought as one complete casual MMO-chat line of at most " + qualityMaxWords + " words. Keep the same subject and do not add new facts. Spell every verified party name exactly, and never tack a greeting onto the end of a thought. Return only the replacement line."));
+                    string retryStyleHint = SocialPerspectiveState.RoleplayActive
+                        ? "one complete short spoken line, as yourself, out loud"
+                        : "one complete casual MMO-chat line";
+                    messages.Add(new ChatMessage("user", "Rewrite the whole thought as " + retryStyleHint + " of at most " + qualityMaxWords + " words. Keep the same subject and do not add new facts. Spell every verified party name exactly, and never tack a greeting onto the end of a thought. Return only the replacement line."));
                     string retry = await TimedChatAsync(messages);
                     retry = TextSanitizer.CleanReply(retry, speaker.Name, world != null && world.Player != null ? world.Player.Name : null, Math.Max(80, MaxReplyCharactersConfig.Value));
                     string retryCompletenessReason;

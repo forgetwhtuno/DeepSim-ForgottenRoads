@@ -27,6 +27,7 @@ namespace ErenshorDeepSims
                 ClassInterestTests(r);
                 SpokenStyleTests(r);
                 AffinityPromptTests(r);
+                DirectReplyFallbackTests(r);
             }
             finally { SocialPerspectiveState.Current = saved; RoleplayFactionContext.Clear(); }
             return r;
@@ -628,6 +629,57 @@ namespace ErenshorDeepSims
             sim.ClassName = "Paladin";
             string mmo = Flatten(PromptBuilder.BuildAutonomous(sim, new SimMemory(), new WorldSnapshot(), "quiet moment", null, null, false)).ToLowerInvariant();
             Add(r, "MMO prompt has no cultural affinity line", mmo.IndexOf("cultural affinity", StringComparison.Ordinal) < 0);
+        }
+
+        // ---- direct-reply fallback (the group/whisper "no grounded reply survived" boundary) -----
+        // Regression coverage for the bug where an addressed question that failed grounding twice
+        // (very common for a subjective "what do you think about X" turn, since GroundingGuard
+        // treats an uncertain-sounding answer as a rejected deflection) fell back to SocialTemplates'
+        // MMO-flavored filler ("i don't know that one", "beats me on that one") regardless of
+        // /dsroleplay, silently defeating the perspective toggle on exactly the turns most likely to
+        // be live-tested.
+        private static void DirectReplyFallbackTests(List<string> r)
+        {
+            SimSnapshot sim = new SimSnapshot();
+            sim.Name = "Dancer";
+            sim.ClassName = "Windblade";
+
+            string rpUnknown = RoleplayFallback.RenderUnknownFact("heard any news?", sim);
+            Add(r, "RP unknown-fact fallback is not empty", !string.IsNullOrWhiteSpace(rpUnknown));
+            Add(r, "RP unknown-fact fallback avoids the MMO filler wording",
+                rpUnknown.IndexOf("that one", StringComparison.OrdinalIgnoreCase) < 0);
+            Add(r, "RP unknown-fact fallback carries no chat texture", !RoleplayPromptContract.ContainsChatTexture(rpUnknown));
+
+            string subjective;
+            bool got = RoleplayFallback.TryRenderSubjective("dancer what do you think about being a windblade?", sim, out subjective);
+            Add(r, "RP subjective fallback always produces a line", got && !string.IsNullOrWhiteSpace(subjective));
+            // Windblade maps to the Vitheo cultural affinity (RoleplayAffinity.CulturalAffinityFor),
+            // so a question that reads as being about the speaker's own class should surface one of
+            // its affinity lines rather than a generic MMO deflection.
+            Add(r, "RP subjective fallback is not MMO-player phrasing",
+                subjective.IndexOf("not sure on that", StringComparison.OrdinalIgnoreCase) < 0 &&
+                subjective.IndexOf("beats me", StringComparison.OrdinalIgnoreCase) < 0);
+
+            // A speaker with no cultural affinity still gets a fact-free, perspective-correct line
+            // rather than silence or an MMO template.
+            SimSnapshot plainSim = new SimSnapshot();
+            plainSim.Name = "Phanty";
+            plainSim.ClassName = "Reaver";
+            string plainSubjective;
+            bool gotPlain = RoleplayFallback.TryRenderSubjective("what do you think about all this?", plainSim, out plainSubjective);
+            Add(r, "RP subjective fallback works without cultural affinity", gotPlain && !string.IsNullOrWhiteSpace(plainSubjective));
+
+            // The ChatTexture detector (used by KeepSpokenStyle to strip newly-injected native
+            // typing texture) must catch "heh"/"haha", the exact vanilla-personalization suffix
+            // observed in the live-test regression, not just "lol"/"lmao".
+            Add(r, "detects heh", RoleplayPromptContract.ContainsChatTexture("i don't know that one heh"));
+            Add(r, "detects haha", RoleplayPromptContract.ContainsChatTexture("that's funny haha"));
+            Add(r, "KeepSpokenStyle strips newly-added heh",
+                RoleplayPromptContract.KeepSpokenStyle("I don't know that. heh", "I don't know that.") == "I don't know that.");
+
+            // MMO perspective is untouched by this fix: SocialTemplates' fillers are unchanged.
+            string mmoUnknown = SocialTemplates.RenderUnknownFactReply("heard any news?", sim);
+            Add(r, "MMO unknown-fact fallback is unchanged", !string.IsNullOrWhiteSpace(mmoUnknown));
         }
 
         private static bool SetAndCheck(string name, RoleplayFactionAttitude attitude)

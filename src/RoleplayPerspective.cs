@@ -154,7 +154,7 @@ namespace ErenshorDeepSims
         // of the delivery medium, and Erenshor's own PersonalizeString can append them AFTER the
         // Roleplay guard has already accepted a line.
         private static readonly Regex ChatTexture = new Regex(
-            @"(^|[\s.,!?])(lol+|lmao|rofl|xd+|brb|afk|ty|thx|np|gg|wb|o7|ftw|imo|irl)([\s.,!?]|$)" +
+            @"(^|[\s.,!?])(lol+|lmao|rofl|xd+|heh+|haha+|brb|afk|ty|thx|np|gg|wb|o7|ftw|imo|irl)([\s.,!?]|$)" +
             @"|(:\)|:\(|:D|:P|:p|;\)|:3|=\)|\^\^|<3|:'\(|:o|:O)",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
@@ -219,6 +219,50 @@ namespace ErenshorDeepSims
                 }
             }
             return false;
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // DIRECT-REPLY FALLBACK
+    // ------------------------------------------------------------------------------------------
+    // The autonomous/ambient path already refuses to fall back to MMO-flavored templates in
+    // Roleplay (see RoleplayExpressionRouter above). The directly-addressed reply path
+    // (party chat and whisper) needs the same guarantee: when a directly-addressed question's LLM
+    // answer is rejected twice by the grounding guard -- which happens routinely for subjective
+    // "what do you think about X" turns, since GroundingGuard.IsSubjectiveDeflection treats an
+    // uncertain-sounding LLM answer as a rejected deflection -- SOME line still has to be shown.
+    // SocialTemplates' fillers ("i don't know that one", "beats me on that one") are worded as an
+    // MMO player typing in party chat and must never be shown while Roleplay is active, or the
+    // perspective toggle silently does nothing on exactly the turns a player is most likely to
+    // test: an addressed question the model could not verify.
+    internal static class RoleplayFallback
+    {
+        internal static string RenderUnknownFact(string playerMessage, SimSnapshot speaker)
+        {
+            string m = (playerMessage ?? string.Empty).ToLowerInvariant();
+            int seed = RoleplayTemplates.StableHash((speaker == null ? string.Empty : speaker.Name ?? string.Empty) + "|rpunknown|" + m);
+            return RoleplayTemplates.Pick(seed, new string[]
+            {
+                "I don't know that.", "Can't say I know.", "That's not something I've learned.", "No idea, honestly."
+            });
+        }
+
+        // A directly-addressed subjective/opinion question about the speaker's own identity (class,
+        // preferences) is exactly what RoleplayAffinity's cultural-interest lines exist for, so try
+        // that first; otherwise fall back to a fact-free, perspective-correct deflection.
+        internal static bool TryRenderSubjective(string playerMessage, SimSnapshot speaker, out string message)
+        {
+            message = string.Empty;
+            if (speaker == null) return false;
+            string m = (playerMessage ?? string.Empty).ToLowerInvariant();
+            long affinitySeed = RoleplayTemplates.StableHash((speaker.Name ?? string.Empty) + "|rpaffinity|" + m);
+            if (RoleplayAffinity.TryRenderCulturalInterest(speaker.ClassName, speaker.Name, affinitySeed, out message)) return true;
+            int seed = RoleplayTemplates.StableHash((speaker.Name ?? string.Empty) + "|rpsubj|" + m);
+            message = RoleplayTemplates.Pick(seed, new string[]
+            {
+                "Hard to say, honestly.", "I'd rather show you than talk about it.", "Ask me again once we know each other better."
+            });
+            return true;
         }
     }
 

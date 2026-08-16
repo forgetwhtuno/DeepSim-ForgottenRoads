@@ -1011,12 +1011,12 @@ namespace ErenshorDeepSims
                 int score = i; // recent preferences win when the current turn has no clear match
                 string key = (item.TopicKey ?? string.Empty).ToLowerInvariant();
                 if ((key.Contains("zone") && Regex.IsMatch(normalized, @"\b(?:zone|place|area|vibe)\b")) ||
-                    (key.Contains("class") && Regex.IsMatch(normalized, @"\b(?:class|tank|heal|dps|reroll)\b")) ||
+                    (key.Contains("class") && Regex.IsMatch(normalized, @"\b(?:class|tank|tanking|heal|healing|healer|dps|reroll|arcanist|druid|paladin|reaver|stormcaller|windblade|duelist)\b")) ||
                     (key.Contains("pace") && Regex.IsMatch(normalized, @"\b(?:pace|pull|fast|slow|careful)\b")) ||
                     (key.Contains("gear") && Regex.IsMatch(normalized, @"\b(?:gear|armor|weapon|looks|style)\b")) ||
                     (key.Contains("enemy") && Regex.IsMatch(normalized, @"\b(?:enemy|mob|monster|design)\b")) ||
                     ((key.Contains("activity") || key.Contains("adventure")) && Regex.IsMatch(normalized, @"\b(?:dungeon|grind|camp|explore|adventure)\b")) ||
-                    ((key.Contains("downtime") || key.Contains("music") || key.Contains("food")) && Regex.IsMatch(normalized, @"\b(?:music|food|snack|weather|listen)\b"))) score += 100;
+                    ((key.Contains("downtime") || key.Contains("music") || key.Contains("food")) && Regex.IsMatch(normalized, @"\b(?:music|food|snack|weather|listen|listening|read|reading|book|books|watch|watching)\b"))) score += 100;
                 scored.Add(new KeyValuePair<int, SimPreferenceMemory>(score, item));
             }
             scored.Sort(delegate(KeyValuePair<int, SimPreferenceMemory> a, KeyValuePair<int, SimPreferenceMemory> b)

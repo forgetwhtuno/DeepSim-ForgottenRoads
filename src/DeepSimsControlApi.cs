@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using ForgottenRoads.StandaloneUi;
 
 namespace ErenshorDeepSims
 {
@@ -15,8 +16,8 @@ namespace ErenshorDeepSims
         public const int SchemaVersion = 1;
         public const int ApiVersion = 1;
         public const string ModuleId = "deepsims";
-        public const bool HasDedicatedPanel = false;
-        public const bool IsPanelOpen = false;
+        public static bool HasDedicatedPanel { get { return true; } }
+        public static bool IsPanelOpen { get { return StandaloneFallbackUi.IsOpen; } }
 
         public static bool IsAvailable { get { return DeepSimsPlugin.Instance != null; } }
 
@@ -87,5 +88,8 @@ namespace ErenshorDeepSims
             if (plugin == null) { failure = "Deep Sims is not loaded."; return false; }
             return plugin.TryRefreshControlStatus(out failure);
         }
+
+        public static bool OpenPanel() { return StandaloneFallbackUi.Open(); }
+        public static bool ClosePanel() { return StandaloneFallbackUi.Close(); }
     }
 }

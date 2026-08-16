@@ -12,9 +12,10 @@ using System.Threading.Tasks;
 using System.Text;
 using System.Text.RegularExpressions;
 using UnityEngine;
+using ForgottenRoads.StandaloneUi;
 
-[assembly: AssemblyVersion("0.7.3.0")]
-[assembly: AssemblyFileVersion("0.7.3.0")]
+[assembly: AssemblyVersion("0.7.4.0")]
+[assembly: AssemblyFileVersion("0.7.4.0")]
 
 namespace ErenshorDeepSims
 {
@@ -25,7 +26,7 @@ namespace ErenshorDeepSims
     {
         public const string PluginGuid = "forgetwhtuno.erenshor.deepsims";
         public const string PluginName = "Erenshor Deep Sims";
-        public const string PluginVersion = "0.7.3";
+        public const string PluginVersion = "0.7.4";
 
         internal static DeepSimsPlugin Instance;
         private static int _instanceSerialCounter;
@@ -459,7 +460,17 @@ namespace ErenshorDeepSims
             }
 
             Logger.LogInfo(PluginName + " " + PluginVersion + " loaded. [party-grounding-r2 live-facts+stance-guard] Whole-party Deep Sim enhancement enabled (hard cap 5).");
+            StandaloneFallbackUi.Initialize(this, "deepsims", "DEEP SIMS",
+                "Quick social controls. Detailed diagnostics and memory tools remain available through compatibility commands.", 280f,
+                DeepSimsControlApi.GetHubStatus,
+                new FallbackAction("Refresh Status", RefreshFallbackStatus, null),
+                new FallbackAction("Quiet", delegate { return SetFallbackActivity("Quiet"); }, null),
+                new FallbackAction("Normal", delegate { return SetFallbackActivity("Normal"); }, null),
+                new FallbackAction("Lively", delegate { return SetFallbackActivity("Lively"); }, null));
         }
+
+        private static bool RefreshFallbackStatus() { string failure; return DeepSimsControlApi.TryRefreshStatus(out failure); }
+        private static bool SetFallbackActivity(string value) { string failure; return DeepSimsControlApi.TrySetActivity(value, out failure); }
 
         private bool EnqueueMainThread(Action action)
         {
@@ -481,6 +492,7 @@ namespace ErenshorDeepSims
 
         private void OnDestroy()
         {
+            StandaloneFallbackUi.Dispose();
             if (DeepSimsDiagnostics.Verbose)
                 Logger.LogDebug("[DeepSimsInstanceDiag] lifecycle=OnDestroy serial=" + _instanceSerial +
                     " unityId=" + GetInstanceID() + " instanceMatches=" + ReferenceEquals(Instance, this));
@@ -665,6 +677,7 @@ namespace ErenshorDeepSims
             // patches elsewhere in this file.
             try
             {
+                StandaloneFallbackUi.Tick(DeepSimsCharacterIdentity.IsLocalCharacterReady());
                 DeepSimsDiagnostics.Verbose = VerboseLoggingConfig != null && VerboseLoggingConfig.Value;
                 SyncSocialPerspectiveFromConfig();
                 ObserveFramePerformance();
@@ -2277,7 +2290,7 @@ namespace ErenshorDeepSims
             return true;
         }
 
-        private bool QueueTemplateDirectorEvent(DirectorEvent evt, SimSnapshot speaker, WorldSnapshot world, int conversationGeneration = -1)
+        private bool QueueTemplateDirectorEvent(DirectorEvent evt, SimSnapshot speaker, WorldSnapshot world, int conversationGeneration = -1, ConnectedBanterPlan connectedBanter = null)
         {
             if (evt == null || speaker == null) return false;
             WorldSnapshot currentWorld = BuildAwareWorld();
@@ -2300,8 +2313,8 @@ namespace ErenshorDeepSims
                     Math.Max(80, MaxReplyCharactersConfig.Value));
                 if (string.IsNullOrWhiteSpace(seededReply) || IsNoMessage(seededReply)) return false;
                 if (!QueueGroupMessage(DateTime.UtcNow.AddSeconds(CalculateTypingDelay(seededReply)),
-                    speaker, seededReply, world, false, true, evt.Type, conversationGeneration)) return false;
-                NoteAmbientTopicEmitted(evt, speaker.Name, seededReply);
+                    speaker, seededReply, world, false, true, evt.Type, conversationGeneration, null, null, null, connectedBanter)) return false;
+                if (connectedBanter == null) NoteAmbientTopicEmitted(evt, speaker.Name, seededReply);
                 SetResponseStatus("queued", speaker.Name + " deterministic " + evt.TopicKey + " topic");
                 return true;
             }
@@ -2546,13 +2559,12 @@ namespace ErenshorDeepSims
         private async Task<WikiResult> ResolveRoutedKnowledgeAsync(string message, WorldSnapshot world,
             int workGeneration, SemanticTurnRoute route)
         {
+            if (route == null || route.KnowledgeNeed == KnowledgeNeed.None) return null;
             if (_telemetry != null)
             {
                 WikiResult experienced = _telemetry.TryResolveExperiencedKnowledge(message);
                 if (experienced != null && experienced.Found) return experienced;
             }
-            if (route == null || route.KnowledgeNeed == KnowledgeNeed.None) return null;
-
             if (route.KnowledgeNeed == KnowledgeNeed.GameWiki || route.KnowledgeNeed == KnowledgeNeed.BothAmbiguous)
             {
                 string query = string.IsNullOrWhiteSpace(route.SearchQuery)
@@ -3077,6 +3089,69 @@ namespace ErenshorDeepSims
                 _memory.RecordGroupChatContext(active[i], speaker, text);
         }
 
+        private void RecordVisibleSoftPreference(string speaker, string text, string topicKey)
+        {
+            if (_memory == null || _slots == null || string.IsNullOrWhiteSpace(topicKey) || string.IsNullOrWhiteSpace(text)) return;
+            try
+            {
+                SimSnapshot fresh = _slots.GetSnapshot(speaker);
+                if (fresh == null || !_slots.IsDeepSim(speaker)) return;
+                if (!DirectPreferenceTopicPolicy.CanEstablishFromVisible(topicKey, text)) return;
+                _memory.RecordExpressedPreference(fresh, topicKey, text);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogDebug("Could not record visible SoftPersona preference: " + DiagnosticPrivacy.ExceptionType(ex));
+            }
+        }
+
+        private void StartConnectedBanterAfterVisible(ScheduledGroupMessage line, string shown)
+        {
+            ConnectedBanterPlan plan = line == null ? null : line.ConnectedBanter;
+            if (plan == null || plan.RemainingReplies <= 0 || string.IsNullOrWhiteSpace(shown) || _requestStopping) return;
+            int generation = line.ConversationGeneration;
+            if (generation < 0 || ConversationTurnGuard.IsStale(generation, CurrentConversationGeneration())) return;
+
+            if (plan.ManualThread && !string.IsNullOrWhiteSpace(plan.TopicKey))
+            {
+                DirectorEvent emitted = new DirectorEvent(string.IsNullOrWhiteSpace(plan.EventType) ? "manual_banter_test" : plan.EventType,
+                    "Visible connected banter opener.", 0);
+                emitted.OpportunityId = plan.OpportunityId;
+                emitted.TopicKey = plan.TopicKey;
+                emitted.CooldownGroup = plan.CooldownGroup;
+                emitted.PromptHint = plan.PromptHint;
+                emitted.VerifiedFact = plan.VerifiedFact;
+                NoteAmbientTopicEmitted(emitted, line.Speaker, shown);
+            }
+
+            List<ConversationLine> visible = GetRecentPartyConversation(5);
+            List<ConversationLine> thread;
+            if (!ConnectedBanterThreadPolicy.TryBuildFromVisible(visible, line.Speaker, shown, out thread))
+            {
+                Logger.LogDebug("[DeepSims][Banter] visible opener mismatch; autonomous tail not started");
+                return;
+            }
+            Logger.LogDebug("[DeepSims][Banter] openerAccepted hash=" + SeedHash.Stable(shown).ToString("x8") +
+                " chars=" + shown.Length);
+
+            WorldSnapshot world = BuildAwareWorld();
+            List<SimSnapshot> active = world == null || world.Party == null ? new List<SimSnapshot>() : new List<SimSnapshot>(world.Party);
+            if (active.Count < 2) return;
+            string connectedTopic = string.IsNullOrWhiteSpace(plan.TopicKey) ? "manual_banter" : plan.TopicKey;
+            SocialIntent intent = new SocialIntent(
+                "manual_banter_visible", connectedTopic, CurrentConversationId(), generation, plan.PromptHint,
+                plan.VerifiedFact, line.Speaker);
+            Func<bool> stale = delegate { return generation != CurrentConversationGeneration(); };
+            QueueRequestWork(RequestLane.Autonomous, "manual-banter-tail", stale, async delegate
+            {
+                await ContinueConversationThreadAsync(thread, active, world, line.Speaker, DateTime.UtcNow,
+                    Math.Min(ConnectedBanterThreadPolicy.ManualTailReplies, plan.RemainingReplies), null, true,
+                    generation, false, plan.VerifiedFact, intent).ConfigureAwait(false);
+            });
+            Logger.LogDebug("[DeepSims][Banter] opener_visible=True tailQueued=True maxTail=" +
+                Math.Min(ConnectedBanterThreadPolicy.ManualTailReplies, plan.RemainingReplies));
+        }
+
         private void AppendPartyConversation(string speaker, string text)
         {
             if (string.IsNullOrWhiteSpace(text)) return;
@@ -3158,6 +3233,7 @@ namespace ErenshorDeepSims
 
             WorldSnapshot world = BuildAwareWorld();
             PartyReplyIntent replyIntent = PartyReplyIntentClassifier.Classify(playerMessage);
+            string directPreferenceTopic = DirectPreferenceTopicPolicy.Resolve(playerMessage, replyIntent);
             active = world.Party == null ? new List<SimSnapshot>() : new List<SimSnapshot>(world.Party);
             int conversationGeneration = CurrentConversationGeneration();
             // Snapshot the memory store reference now, on the main thread, so the background
@@ -3192,7 +3268,12 @@ namespace ErenshorDeepSims
                 SemanticTurnRoute semanticRoute = await ClassifySemanticTurnAsync(playerMessage,
                     PromptBuilder.ClassifyThreadTopic(playerMessage)).ConfigureAwait(false);
                 if (stale()) { NoteStaleDiscard("before-lookup"); return; }
+                SemanticTurnRouter.ApplyNoRetrievalRule(semanticRoute);
                 bool lookupExpected = semanticRoute != null && semanticRoute.KnowledgeNeed != KnowledgeNeed.None;
+                Logger.LogDebug("[DeepSims][Route] turnType=" + (semanticRoute == null ? "unknown" : semanticRoute.TurnType.ToString()) +
+                    " knowledgeNeed=" + (semanticRoute == null ? "unknown" : semanticRoute.KnowledgeNeed.ToString()) +
+                    " retrievalDecision=" + (lookupExpected ? "retrieve" : "social") +
+                    " retrievalReason=" + (lookupExpected ? "semantic-factual" : "semantic-social"));
                 if (lookupExpected)
                 {
                     string acknowledgement = SemanticTurnRouter.LookupAcknowledgement(speaker, semanticRoute);
@@ -3282,7 +3363,7 @@ namespace ErenshorDeepSims
                     if (stale()) { NoteStaleDiscard("after-inference", isNewsAnswer ? "news" : null, conversationGeneration); return; }
                     DateTime due = DateTime.UtcNow.AddSeconds(CalculateTypingDelay(first));
                     if (!QueueGroupMessage(due, speaker, first, world, false, false, null, conversationGeneration,
-                        isNewsAnswer ? "news" : null, partyRequest))
+                        isNewsAnswer ? "news" : null, partyRequest, directPreferenceTopic, null))
                     {
                         SetResponseStatus("rejected", "first reply suppressed before queue");
                         if (!forceResponse) return;
@@ -3294,7 +3375,7 @@ namespace ErenshorDeepSims
                         if (fallbackGuardRejected || string.IsNullOrWhiteSpace(queueFallback)) return;
                         due = DateTime.UtcNow.AddSeconds(CalculateTypingDelay(queueFallback));
                         if (!QueueGroupMessage(due, speaker, queueFallback, world, true, false, null, conversationGeneration,
-                            isNewsAnswer ? "news" : null, partyRequest)) return;
+                            isNewsAnswer ? "news" : null, partyRequest, directPreferenceTopic, null)) return;
                         first = queueFallback;
                     }
                     if (isNewsAnswer) Logger.LogDebug("news answer scheduled generation=" + conversationGeneration);
@@ -3631,6 +3712,19 @@ namespace ErenshorDeepSims
             catch (Exception ex) { Logger.LogDebug("Could not record event social thread: " + DiagnosticPrivacy.ExceptionType(ex)); }
         }
 
+        // Compatibility wrapper for older internal callers. The authoritative manual banter path is
+        // SocialDirector.ForceBanter -> QueueAutonomousReaction(manual_banter_test), so it uses the
+        // same seed, inference, grounding, queue, and turn-generation architecture as normal chatter.
+        internal void QueueManualBanter()
+        {
+            if (_director == null)
+            {
+                WriteChat("[DeepSims] Banter could not be generated: reason=director_unavailable", "yellow");
+                return;
+            }
+            _director.ForceBanter();
+        }
+
         internal void QueueAutonomousReaction(DirectorEvent evt, string requestedSpeaker, bool allowFollowUp, bool forceMessage)
         {
             if (evt == null || _slots == null) return;
@@ -3653,16 +3747,29 @@ namespace ErenshorDeepSims
                 : ResolveAutonomousExpressionMode(evt.Type);
             if (expression == SocialExpressionMode.Off) return;
 
+            bool connectedManualBanter = string.Equals(evt.Type, "manual_banter_test", StringComparison.OrdinalIgnoreCase);
+            ConnectedBanterPlan connectedPlan = connectedManualBanter ? new ConnectedBanterPlan
+            {
+                RemainingReplies = ConnectedBanterThreadPolicy.ManualTailReplies,
+                OpportunityId = evt.OpportunityId,
+                EventType = evt.Type ?? string.Empty,
+                TopicKey = evt.TopicKey ?? string.Empty,
+                CooldownGroup = evt.CooldownGroup ?? string.Empty,
+                PromptHint = evt.PromptHint ?? string.Empty,
+                VerifiedFact = evt.VerifiedFact ?? string.Empty,
+                ManualThread = true
+            } : null;
+
             if (expression == SocialExpressionMode.Templates)
             {
-                QueueTemplateDirectorEvent(evt, speaker, world);
+                QueueTemplateDirectorEvent(evt, speaker, world, -1, connectedPlan);
                 return;
             }
 
             string unavailableReason;
             if (!CanRunAi(out unavailableReason))
             {
-                if (!QueueTemplateDirectorEvent(evt, speaker, world) && forceMessage)
+                if (!QueueTemplateDirectorEvent(evt, speaker, world, -1, connectedPlan) && forceMessage)
                     WriteChat("[DeepSims] AI is unavailable: " + unavailableReason, "yellow");
                 return;
             }
@@ -3728,6 +3835,21 @@ namespace ErenshorDeepSims
                         Math.Max(80, MaxReplyCharactersConfig.Value));
                     first = await GroundPartyLineAsync(first, messages, speaker, speakerMemory, world,
                         situation, null, forceMessage, situation, intent, null, forceMessage ? "dstalk" : "autonomous", partyRequest).ConfigureAwait(false);
+                    // `/dsbanter` is an explicit social diagnostic request. If the selected seed's model
+                    // wording fails grounding, reuse that SAME fact/provenance-owned seed through the
+                    // existing deterministic expression router rather than falling silent or switching
+                    // subjects. This does not weaken the verifier and still crosses all final guards.
+                    if (IsNoMessage(first) && connectedManualBanter && evt.HasSeed)
+                    {
+                        string manualFallback;
+                        if (RoleplayExpressionRouter.TryRenderAmbientSeed(evt.TopicKey, evt.VerifiedFact, evt.OpportunityId, speaker, out manualFallback))
+                        {
+                            first = TextSanitizer.CleanReply(manualFallback, speaker.Name,
+                                world != null && world.Player != null ? world.Player.Name : null,
+                                Math.Max(80, MaxReplyCharactersConfig.Value));
+                            Logger.LogDebug("[DeepSims][Banter] openerFallback=template topic=" + evt.TopicKey);
+                        }
+                    }
                     // Roleplay voice guard runs after grounding so it sees the line that would actually
                     // be spoken. MMO perspective passes straight through.
                     first = ApplyRoleplayAutonomousGuard(first, evt == null ? null : evt.TopicKey,
@@ -3747,13 +3869,15 @@ namespace ErenshorDeepSims
 
                     if (stale()) { NoteStaleDiscard("before-display"); return; }
                     DateTime due = DateTime.UtcNow.AddSeconds(CalculateTypingDelay(first));
-                    if (!QueueGroupMessage(due, speaker, first, world, false, !forceMessage, evt.Type, conversationGeneration, null, partyRequest)) return;
-                    NoteAmbientTopicEmitted(evt, speaker.Name, first, requestMemory, characterGeneration, conversationGeneration);
+                    if (!QueueGroupMessage(due, speaker, first, world, false, !forceMessage, evt.Type, conversationGeneration,
+                        connectedManualBanter ? "manual_banter" : null, partyRequest, null, connectedPlan)) return;
+                    if (!connectedManualBanter)
+                        NoteAmbientTopicEmitted(evt, speaker.Name, first, requestMemory, characterGeneration, conversationGeneration);
 
                     _inferenceGate.Release();
                     gateHeld = false;
 
-                    if (allowFollowUp && ConversationThreadsConfig.Value && SimToSimConfig.Value && active.Count > 1)
+                    if (!connectedManualBanter && allowFollowUp && ConversationThreadsConfig.Value && SimToSimConfig.Value && active.Count > 1)
                     {
                         List<ConversationLine> thread = new List<ConversationLine>(recentContext);
                         thread.Add(new ConversationLine(speaker.Name, first));
@@ -4158,6 +4282,8 @@ namespace ErenshorDeepSims
                 else if (isExternalNewsAnswer) line = "found some headlines but I can't say much more without guessing";
                 else
                 {
+                    if (intent != null && _director != null)
+                        _director.NoteAmbientTopicRejected(intent, speaker == null ? string.Empty : speaker.Name, retryReason);
                     // A subjective/opinion question (e.g. "what do you think about being a windblade?")
                     // rejected as an uncertainty deflection deserves an opinionated fallback, not the
                     // factual "I don't know" template -- this is the same distinction the caller above
@@ -4167,7 +4293,14 @@ namespace ErenshorDeepSims
                     if (directReplyIntent.HasValue && PartyReplyIntentClassifier.IsSubjective(directReplyIntent.Value) &&
                         TryRenderSubjectiveReplyForPerspective(fallbackSource, speaker, directReplyIntent.Value, out subjective))
                         line = subjective;
-                    else line = externalFacts != null ? RenderUnknownFactReplyForPerspective(fallbackSource, speaker) : "NO_MESSAGE";
+                    else if (externalFacts != null) line = RenderUnknownFactReplyForPerspective(fallbackSource, speaker);
+                    else if (forceMessage && directReplyIntent.HasValue && !string.IsNullOrWhiteSpace(fallbackSource))
+                    {
+                        string fallbackCategory = DirectResponseFallback.ClassifyRejectionReason(retryReason);
+                        line = DirectResponseFallback.RenderAfterGroundingRejection(fallbackSource, retryReason, speaker);
+                        Logger.LogDebug("[DeepSims][DirectFallback] category=" + fallbackCategory + " visibleCandidate=" + (!IsNoMessage(line)));
+                    }
+                    else line = "NO_MESSAGE";
                     if (!IsNoMessage(line))
                     {
                         bool fbGuardRan, fbGuardChanged, fbGuardRejected;
@@ -4255,6 +4388,7 @@ namespace ErenshorDeepSims
             if (thread == null || active == null || active.Count < 2 || remainingReplies <= 0) return;
             MemoryStore threadMemory = _memory;
             int characterGeneration = Volatile.Read(ref _characterScopeGeneration);
+            bool connectedManualThread = socialIntent != null && string.Equals(socialIntent.Source, "manual_banter_visible", StringComparison.OrdinalIgnoreCase);
             Dictionary<string, int> speakerCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < thread.Count; i++)
             {
@@ -4290,6 +4424,13 @@ namespace ErenshorDeepSims
                 if (!string.IsNullOrWhiteSpace(newestVisibleText) && !string.Equals(newestVisibleText, threadLastText, StringComparison.OrdinalIgnoreCase) &&
                     ConversationTurnGuard.TopicChanged(ConversationTurnGuard.BuildRecentWindow(thread, 5), newestVisibleText, PromptBuilder.ClassifyThreadTopic))
                     break;
+                // Generate continuation only from the actual displayed line, after final display
+                // guards have run. A queued-but-rejected opener can never become conversational input.
+                if (liveVisible.Count > 0 && string.Equals(newestVisibleText, threadLastText, StringComparison.OrdinalIgnoreCase))
+                    thread = new List<ConversationLine>(liveVisible);
+                if (connectedManualThread && generated == 0 && !string.IsNullOrWhiteSpace(threadLastText))
+                    Logger.LogDebug("[DeepSims][Banter] continuationContext hash=" + SeedHash.Stable(threadLastText).ToString("x8") +
+                        " chars=" + threadLastText.Length);
 
                 // Continuation turns never reuse the opener's frozen party. Re-capture native membership
                 // before deciding who can speak this turn.
@@ -4360,6 +4501,14 @@ namespace ErenshorDeepSims
                     finally { _inferenceGate.Release(); }
                 }
 
+                if (IsNoMessage(reply) && connectedManualThread)
+                {
+                    string boundedFallback;
+                    bool rendered = SocialPerspectiveState.RoleplayActive
+                        ? RoleplayTemplates.TryRenderThreadReply(threadLastText, next, out boundedFallback)
+                        : SocialTemplates.TryRenderThreadReply(threadLastText, next, out boundedFallback);
+                    if (rendered) reply = boundedFallback;
+                }
                 if (IsNoMessage(reply)) break;
 
                 // Root-cause fix: a reply generated for an older topic must not be displayed just
@@ -4389,7 +4538,7 @@ namespace ErenshorDeepSims
             // actually participated, without treating the dialogue itself as verified world facts.
             try
             {
-                if (threadMemory != null && thread.Count >= 2 &&
+                if (!connectedManualThread && threadMemory != null && thread.Count >= 2 &&
                     ReferenceEquals(_memory, threadMemory) &&
                     CharacterScopeWriteGuard.CanCommit(characterGeneration, Volatile.Read(ref _characterScopeGeneration),
                         conversationGeneration, CurrentConversationGeneration()))
@@ -4523,7 +4672,8 @@ namespace ErenshorDeepSims
         }
 
         private bool QueueGroupMessage(DateTime dueUtc, SimSnapshot sim, string rawText, WorldSnapshot world, bool bypassDuplicateGuard = false, bool autonomous = false, string socialType = null,
-            int conversationGeneration = -1, string diagnosticContext = null, PartyGroundingRequestContext partyRequest = null)
+            int conversationGeneration = -1, string diagnosticContext = null, PartyGroundingRequestContext partyRequest = null,
+            string softPreferenceTopicKey = null, ConnectedBanterPlan connectedBanter = null)
         {
             // Background inference threads only enqueue plain strings. Touching SimPlayer/Unity components is
             // deferred until FlushScheduledGroupMessages runs on Unity's main thread.
@@ -4625,7 +4775,8 @@ namespace ErenshorDeepSims
                     sim.PartyActorId,
                     partyRequest == null ? (socialType ?? string.Empty) : partyRequest.Path,
                     partyRequest == null ? (queueFacts == null ? DateTime.MinValue : queueFacts.CapturedUtc) : partyRequest.CapturedUtc,
-                    partyRequest == null ? (world == null || world.Party == null ? 0 : world.Party.Count) : partyRequest.EligibleSpeakerCount);
+                    partyRequest == null ? (world == null || world.Party == null ? 0 : world.Party.Count) : partyRequest.EligibleSpeakerCount,
+                    softPreferenceTopicKey, connectedBanter);
             }
             if (staleAtEnqueue)
             {
@@ -4787,6 +4938,9 @@ namespace ErenshorDeepSims
                             Logger.LogWarning("COOP party broadcast disabled: bundled SendMessageToPlayers reaches every same-zone peer and exposes no safe party recipient filter. Deep Sim speech remains host-local. TODO: adopt a verified party-targeted COOP API if one is added.");
                     }
                     RecordSharedDialogueContext(line.Speaker, shown);
+                    if (!string.IsNullOrWhiteSpace(line.SoftPreferenceTopicKey))
+                        RecordVisibleSoftPreference(line.Speaker, shown, line.SoftPreferenceTopicKey);
+                    StartConnectedBanterAfterVisible(line, shown);
                     if (_director != null) _director.NotePartyChatActivity();
                     SetResponseStatus("displayed", line.Speaker + " replied");
                 }

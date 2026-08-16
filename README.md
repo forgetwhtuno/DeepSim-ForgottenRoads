@@ -1,10 +1,10 @@
-# Deep Sims for Erenshor 0.7.3 — social-session overhaul development candidate
+# Deep Sims for Erenshor 0.7.4 — grounded social UX development candidate
 
 Deep Sims makes Erenshor's existing SimPlayers feel more like persistent MMO companions. It observes verified game state, keeps bounded sidecar memory, and produces short social dialogue through deterministic templates or an optional local Ollama model.
 
 **Deep Sims does not replace Erenshor's Sim AI and does not control gameplay.** Erenshor remains authoritative for movement, combat, pulls, healing, targeting, loot, grouping, roles, equipment, quests, faction, progression, and saves.
 
-> This branch is being prepared as a native Lunaris build. Treat 0.7.3 as a development/migration candidate until the compile and in-game conversation checklist is completed on a current Erenshor installation.
+> This branch is being prepared as a native Lunaris build. Treat 0.7.4 as a development/migration candidate until the compile and in-game conversation checklist is completed on a current Erenshor installation.
 
 Part of the **Forgotten Roads for Erenshor** mod collection.
 
@@ -255,6 +255,6 @@ If Deep Sims does not appear:
 
 ## Development note
 
-This project has been developed substantially with AI-assisted coding tools, guided through design, testing, playtesting, audits, and iteration against Erenshor. Bug reports, code review, corrections, and contributions from experienced Erenshor modders are welcome.
+Development is guided through design, testing, playtesting, audits, and iteration against Erenshor. Bug reports, code review, corrections, and contributions from experienced Erenshor modders are welcome.
 
 This is an unofficial community-made mod for Erenshor and is not affiliated with or endorsed by the game's developer.

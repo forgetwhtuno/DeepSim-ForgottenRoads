@@ -44,6 +44,9 @@ namespace ErenshorDeepSims
             Add(results, "Relax topics flow through the shared selector", RelaxTopicsFlowThroughSharedSelector);
             Add(results, "Relax verified_outing requires a supplied, sourced fact", RelaxVerifiedOutingRequiresSource);
             Add(results, "Relax silence threshold sits below Normal", RelaxSilenceThresholdIsLowerThanNormal);
+            Add(results, "seed requiring another Sim is rejected before generation", OtherSimSeedRequiresAnotherVisibleSim);
+            Add(results, "post-generation rejection applies bounded temporary penalty", RejectionPenaltyIsBoundedAndTemporary);
+            Add(results, "rejection penalty is scoped to topic and speaker", RejectionPenaltyIsScoped);
 
             return results;
         }
@@ -684,6 +687,46 @@ namespace ErenshorDeepSims
                 0, T0, AmbientSeedSelector.DefaultSilenceNormal, AmbientSeedSelector.DefaultSilenceCamp,
                 0.0, 0.0, false, true, familiarityBySpeaker);
             if (!decision.SilenceWon) return "familiarity manufactured a subject from an empty candidate list";
+            return null;
+        }
+
+        private static string OtherSimSeedRequiresAnotherVisibleSim()
+        {
+            AmbientSeedCandidate candidate = new AmbientSeedCandidate(AmbientTopics.Find("other_sim_preference"), T0);
+            string reason;
+            if (AmbientSeedPrerequisitePolicy.IsSupported(candidate, new List<SimSnapshot> { new SimSnapshot { Name = "Fiora" } }, out reason))
+                return "single-Sim party was allowed to select an other-Sim seed";
+            if (reason.IndexOf("another visible", StringComparison.OrdinalIgnoreCase) < 0) return "missing explicit prerequisite reason";
+            if (!AmbientSeedPrerequisitePolicy.IsSupported(candidate, new List<SimSnapshot> { new SimSnapshot { Name = "Fiora" }, new SimSnapshot { Name = "Phanty" } }, out reason))
+                return "two visible eligible Sims were incorrectly rejected";
+            return null;
+        }
+
+        private static string RejectionPenaltyIsBoundedAndTemporary()
+        {
+            TopicFatigueTracker fatigue = new TopicFatigueTracker();
+            string detail;
+            double before = fatigue.Penalty("other_sim_preference", "social", "Astra", 0, T0, out detail);
+            fatigue.NoteRejected("other_sim_preference", "Astra", "topic mismatch", T0);
+            double immediate = fatigue.Penalty("other_sim_preference", "social", "Astra", 0, T0.AddSeconds(1), out detail);
+            double later = fatigue.Penalty("other_sim_preference", "social", "Astra", 0, T0.AddSeconds(240), out detail);
+            if (before != 0.0) return "fresh topic unexpectedly penalized";
+            if (immediate < 20.0 || immediate > 60.0) return "temporary rejection penalty out of bounds: " + immediate;
+            if (later != 0.0) return "rejection penalty did not expire";
+            return null;
+        }
+
+        private static string RejectionPenaltyIsScoped()
+        {
+            TopicFatigueTracker fatigue = new TopicFatigueTracker();
+            fatigue.NoteRejected("other_sim_preference", "Astra", "topic mismatch", T0);
+            string detail;
+            double same = fatigue.Penalty("other_sim_preference", "social", "Astra", 0, T0.AddSeconds(2), out detail);
+            double otherSpeaker = fatigue.Penalty("other_sim_preference", "social", "Cyndara", 0, T0.AddSeconds(2), out detail);
+            double otherTopic = fatigue.Penalty("class_opinion", "preference", "Astra", 0, T0.AddSeconds(2), out detail);
+            if (same <= 0.0) return "same failed semantic seed received no penalty";
+            if (otherSpeaker != 0.0) return "one Sim's stochastic failure penalized another Sim";
+            if (otherTopic != 0.0) return "one topic failure penalized a different topic";
             return null;
         }
 

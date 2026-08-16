@@ -1,3 +1,12 @@
+## 0.7.4 development — grounded opinions / connected banter / rejection UX
+
+- Treat explicit personal-taste questions semantically: class/item nouns no longer force Wiki retrieval when the player is asking the Sim's opinion, while factual mechanics/source questions still route to retrieval.
+- `/dsbanter` now starts through the existing Social Director and only queues its response turn after the opener has actually survived grounding and become visible; the response context is the exact accepted visible line and the manual thread is hard-capped at A + B.
+- Direct player-addressed replies that fail strict grounding now use a bounded grounded/template fallback where safe; rejected generated claims remain hidden and only the visible fallback enters conversation history.
+- Added short-lived negative admission memory for rejected autonomous semantic seeds and pre-generation rejection for seeds that require another visible eligible Sim. The grounding verifier is unchanged.
+- Accepted visible subjective replies may establish bounded SoftPersona continuity only after the final display boundary; generated world claims still cannot become verified history.
+- Added privacy-safe banter/fallback diagnostics for the live acceptance matrix without logging dialogue content.
+
 ## 0.7.3 development — coherent party conversation / session routing
 
 - Routes each player party-chat turn through a compact semantic classification step before retrieval or response generation.

@@ -104,17 +104,23 @@ $MemoryDir = Join-Path $ConfigRoot "DeepSims\Memory"
 
 $AssemblyCSharp = Join-Path $Managed "Assembly-CSharp.dll"
 $JsonModule = Join-Path $Managed "UnityEngine.JSONSerializeModule.dll"
+$UiModule = Join-Path $Managed "UnityEngine.UIModule.dll"
+$TextRenderingModule = Join-Path $Managed "UnityEngine.TextRenderingModule.dll"
+$UnityUi = Join-Path $Managed "UnityEngine.UI.dll"
+$UnityEngineFacade = Join-Path $Managed "UnityEngine.dll"
+$UnityEngineCore = Join-Path $Managed "UnityEngine.CoreModule.dll"
+$Netstandard = Join-Path $Managed "netstandard.dll"
 $LunarisDll = Join-Path $LunarisLibDir "Lunaris.dll"
 $HarmonyDll = Join-Path $LunarisLibDir "0Harmony.dll"
 
-foreach ($required in @($AssemblyCSharp, $JsonModule, $LunarisDll, $HarmonyDll)) {
+foreach ($required in @($AssemblyCSharp, $JsonModule, $UnityEngineFacade, $UnityEngineCore, $UiModule, $TextRenderingModule, $UnityUi, $Netstandard, $LunarisDll, $HarmonyDll)) {
     if (-not (Test-Path $required)) { throw "Required reference not found: $required" }
 }
 
 New-Item -ItemType Directory -Force -Path $PluginRoot, $ConfigRoot, $MemoryDir | Out-Null
 
 $Refs = New-Object System.Collections.Generic.List[string]
-foreach ($required in @($LunarisDll, $HarmonyDll, $AssemblyCSharp, $JsonModule)) { Add-ReferenceIfPresent $Refs $required }
+foreach ($required in @($LunarisDll, $HarmonyDll, $AssemblyCSharp, $JsonModule, $UnityEngineFacade, $UnityEngineCore, $UiModule, $TextRenderingModule, $UnityUi, $Netstandard)) { Add-ReferenceIfPresent $Refs $required }
 
 $optionalNames = @(
     "UnityEngine.dll",
@@ -132,6 +138,9 @@ $optionalNames = @(
     "netstandard.dll"
 )
 foreach ($name in $optionalNames) { Add-ReferenceIfPresent $Refs (Join-Path $Managed $name) }
+foreach ($uiReference in @("UnityEngine.UIModule.dll", "UnityEngine.TextRenderingModule.dll", "UnityEngine.UI.dll")) {
+    if (-not (Test-Path (Join-Path $Managed $uiReference))) { throw "Required fallback UI reference not found: $uiReference" }
+}
 
 $TempDir = Join-Path $env:TEMP ("ErenshorDeepSims-build-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
@@ -147,6 +156,9 @@ try {
     $lines.Add('/out:"' + $TempDll + '"')
     foreach ($r in ($Refs | Select-Object -Unique)) { $lines.Add('/reference:"' + $r + '"') }
     Get-ChildItem (Join-Path $ScriptRoot "src") -Filter "*.cs" | Sort-Object Name | ForEach-Object { $lines.Add('"' + $_.FullName + '"') }
+    $fallbackUi = Join-Path (Split-Path -Parent (Split-Path -Parent $ScriptRoot)) "Erenshor-Mod-Suite\shared\ErenshorSuite.UI\StandaloneFallbackUi.cs"
+    if (-not (Test-Path -LiteralPath $fallbackUi)) { throw "Missing shared standalone UI source: $fallbackUi" }
+    $lines.Add('"' + $fallbackUi + '"')
 
     # Shared contract conformance tests are source-only and optional. They remain part of a normal
     # Deep Sims build when the directory is present, exactly as before the loader migration.
@@ -160,7 +172,7 @@ try {
     $lunarisInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($LunarisDll)
     $lunarisHash = (Get-FileHash -Algorithm SHA256 -Path $LunarisDll).Hash.ToLowerInvariant()
 
-    Write-Host "Building Deep Sims 0.7.3 as a native Lunaris plugin..." -ForegroundColor Cyan
+    Write-Host "Building Deep Sims 0.7.4 as a native Lunaris plugin..." -ForegroundColor Cyan
     Write-Host "  Game:    $GameDir"
     Write-Host "  Lunaris: $LunarisDll"
     Write-Host "  Version: $($lunarisInfo.FileVersion)"
@@ -174,7 +186,7 @@ try {
     Copy-Item -LiteralPath $TempDll -Destination $OutDll -Force
 
     Write-Host ""
-    Write-Host "Deep Sims 0.7.3 installed as a native Lunaris plugin." -ForegroundColor Green
+    Write-Host "Deep Sims 0.7.4 installed as a native Lunaris plugin." -ForegroundColor Green
     Write-Host "  Plugin: $OutDll"
     Write-Host "  Config: $ConfigRoot\erenshordeepsims.lpcfg"
     Write-Host "  Memory: $MemoryDir"

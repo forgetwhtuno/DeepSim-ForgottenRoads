@@ -5,7 +5,7 @@ using System.Text.RegularExpressions;
 
 namespace ErenshorDeepSims
 {
-    internal enum SemanticTurnType { DirectQuestion, Statement, Opinion, Joke, Greeting, CommandLike, Other }
+    internal enum SemanticTurnType { DirectQuestion, Statement, Opinion, PersonalPreference, SocialQuestion, Reaction, Humor, Joke, Greeting, CommandLike, Other }
     internal enum KnowledgeNeed { None, GameWiki, ExternalNews, BothAmbiguous }
     internal enum SessionEventProvenance { VerifiedWorld, PlayerSaid, SimSaid, SoftPersona, ExternalKnowledge, InferenceOnly }
 
@@ -26,7 +26,7 @@ namespace ErenshorDeepSims
         internal static List<ChatMessage> BuildClassificationPrompt(string message, string recentTopic)
         {
             List<ChatMessage> result = new List<ChatMessage>();
-            result.Add(new ChatMessage("system", "Classify one player party-chat turn. Return exactly seven lines: TurnType=DirectQuestion|Statement|Opinion|Joke|Greeting|CommandLike|Other; KnowledgeNeed=None|GameWiki|ExternalNews|BothAmbiguous; Topic=short topic; Subject=resolved subject; SearchQuery=useful query or blank; Confidence=0..1; DirectAnswerRequired=true|false. Social chat, preferences, jokes, greetings, and questions about the party need no retrieval. Game mechanics/items/zones use GameWiki. Current real-world events use ExternalNews. Do not answer the player."));
+            result.Add(new ChatMessage("system", "Classify one player party-chat turn. Return exactly seven lines: TurnType=DirectQuestion|Statement|Opinion|PersonalPreference|SocialQuestion|Reaction|Humor|Joke|Greeting|CommandLike|Other; KnowledgeNeed=None|GameWiki|ExternalNews|BothAmbiguous; Topic=short topic; Subject=resolved subject; SearchQuery=useful query or blank; Confidence=0..1; DirectAnswerRequired=true|false. Opinions, preferences, feelings, humor, greetings, casual social questions, and questions about a Sim's own tastes use KnowledgeNeed=None unless a separate specific factual claim is required. Game mechanics/items/zones use GameWiki. Current real-world events use ExternalNews. Do not answer the player."));
             if (!string.IsNullOrWhiteSpace(recentTopic)) result.Add(new ChatMessage("system", "Recent thread topic: " + Bound(recentTopic, 80)));
             result.Add(new ChatMessage("user", Bound(message, 500)));
             return result;
@@ -63,7 +63,9 @@ namespace ErenshorDeepSims
             parsed.DirectAnswerRequired = fields.TryGetValue("DirectAnswerRequired", out value) && bool.TryParse(value, out required)
                 ? required : turn != SemanticTurnType.CommandLike;
             parsed.SocialIntent = turn == SemanticTurnType.DirectQuestion ? "answer" : turn == SemanticTurnType.Statement || turn == SemanticTurnType.Opinion ? "acknowledge_and_react" : "respond";
-            if (need != KnowledgeNeed.None && string.IsNullOrWhiteSpace(parsed.SearchQuery)) parsed.SearchQuery = BuildUsefulSearchQuery(original, need);
+            ApplyMeaningOverride(parsed, original);
+            ApplyNoRetrievalRule(parsed);
+            if (parsed.KnowledgeNeed != KnowledgeNeed.None && string.IsNullOrWhiteSpace(parsed.SearchQuery)) parsed.SearchQuery = BuildUsefulSearchQuery(original, parsed.KnowledgeNeed);
             route = parsed;
             return true;
         }
@@ -77,11 +79,16 @@ namespace ErenshorDeepSims
             route.DirectAnswerRequired = text.Length > 0;
             route.TurnType = text.IndexOf('?') >= 0 || Regex.IsMatch(lower, @"^(what|where|who|when|why|how|did|does|do|is|are|can|could|would)\b")
                 ? SemanticTurnType.DirectQuestion : SemanticTurnType.Statement;
-            if (Regex.IsMatch(lower, @"\b(i (?:like|love|hate|prefer|think|feel)|imo|my favorite|my favourite)\b")) route.TurnType = SemanticTurnType.Opinion;
+            if (Regex.IsMatch(lower, @"\b(?:do you like|what do you like|do you think|being a|are .* fun|what are you reading|how do you feel|i (?:like|love|hate|prefer|think|feel)|imo|my favorite|my favourite)\b"))
+                route.TurnType = lower.IndexOf("reading", StringComparison.OrdinalIgnoreCase) >= 0 ? SemanticTurnType.SocialQuestion : SemanticTurnType.PersonalPreference;
             if (Regex.IsMatch(lower, @"^(hi|hey|hello|yo|sup)\b")) route.TurnType = SemanticTurnType.Greeting;
             if (Regex.IsMatch(lower, @"\b(today|tonight|latest|current|recent|news)\b") && Regex.IsMatch(lower, @"\b(spacex|nasa|openai|world|news|ukraine|election|market|company)\b")) route.KnowledgeNeed = KnowledgeNeed.ExternalNews;
-            else if (KnowledgeQueryClassifier.ShouldLookup(text) || Regex.IsMatch(lower, @"\b(?:latest|newest|recent)\s+(?:erenshor\s+)?(?:patch|update)|patch notes\b")) route.KnowledgeNeed = KnowledgeNeed.GameWiki;
+            else if (KnowledgeQueryClassifier.ShouldLookup(text) ||
+                Regex.IsMatch(lower, @"\b(?:what abilities|what skills|what spells)\b") ||
+                Regex.IsMatch(lower, @"\b(?:latest|newest|recent)\s+(?:erenshor\s+)?(?:patch|update)\b|patch notes\b")) route.KnowledgeNeed = KnowledgeNeed.GameWiki;
             else route.KnowledgeNeed = KnowledgeNeed.None;
+            ApplyMeaningOverride(route, text);
+            ApplyNoRetrievalRule(route);
             route.Topic = PromptBuilder.ClassifyThreadTopic(text);
             route.Subject = ExtractSubject(text);
             route.SearchQuery = route.KnowledgeNeed == KnowledgeNeed.None ? string.Empty : BuildUsefulSearchQuery(text, route.KnowledgeNeed);
@@ -115,6 +122,57 @@ namespace ErenshorDeepSims
             int seed = StableHash(seedText);
             string[] lines = new string[] { "give me a sec, i'll check", "not sure, let me look", "hang on, i'll check", "let me look that up" };
             return lines[Math.Abs(seed == int.MinValue ? 0 : seed) % lines.Length];
+        }
+
+        // Deterministic meaning override applied after the small-model classifier as well as in the
+        // fallback classifier. The model is allowed to resolve ambiguous turns, but it may not turn
+        // an explicit personal-taste question into a wiki request merely because the subject happens
+        // to be an Erenshor class/item noun. Conversely, current-event and mechanics wording remain
+        // factual even when they contain conversational words such as "think".
+        internal static void ApplyMeaningOverride(SemanticTurnRoute route, string original)
+        {
+            if (route == null || string.IsNullOrWhiteSpace(original)) return;
+            string lower = original.Trim().ToLowerInvariant();
+
+            bool currentExternalFact = Regex.IsMatch(lower, @"\b(today|latest|current|recent|news|happened|happening)\b") &&
+                Regex.IsMatch(lower, @"\b(nasa|spacex|openai|world|ukraine|election|market|company|news)\b");
+            bool explicitGameFact = Regex.IsMatch(lower, @"\b(?:where does|where do|how do i|how can i|what abilities|what skills|what spells|what drops|what does .* drop|what is the drop rate|where is|where are)\b") ||
+                Regex.IsMatch(lower, @"\bwhat do you think (?:is|are|happened|caused|drops|drop)\b");
+            if (currentExternalFact || explicitGameFact) return;
+
+            bool personalTaste = Regex.IsMatch(lower, @"\b(?:do you (?:like|love|enjoy|prefer)|would you (?:rather|prefer)|what do you (?:like|prefer)|what(?:'s| is) your (?:favorite|favourite)|your opinion|how do you feel about|what do you think (?:about|of)|what are you (?:reading|watching|listening to|playing))\b") ||
+                Regex.IsMatch(lower, @"\b(?:like|love|enjoy|prefer) being (?:a|an|the)?\s*\w+");
+            if (!personalTaste) return;
+
+            route.TurnType = lower.IndexOf("what are you reading", StringComparison.Ordinal) >= 0 ||
+                lower.IndexOf("what are you watching", StringComparison.Ordinal) >= 0 ||
+                lower.IndexOf("what are you listening", StringComparison.Ordinal) >= 0
+                ? SemanticTurnType.SocialQuestion
+                : SemanticTurnType.PersonalPreference;
+            route.KnowledgeNeed = KnowledgeNeed.None;
+            route.SearchQuery = string.Empty;
+            route.DirectAnswerRequired = true;
+            route.SocialIntent = "answer_personal_opinion";
+        }
+
+        // A class name or other topical noun must not reopen lookup after the semantic route has
+        // recognized a normal social turn.
+        internal static void ApplyNoRetrievalRule(SemanticTurnRoute route)
+        {
+            if (route == null) return;
+            switch (route.TurnType)
+            {
+                case SemanticTurnType.Opinion:
+                case SemanticTurnType.PersonalPreference:
+                case SemanticTurnType.SocialQuestion:
+                case SemanticTurnType.Reaction:
+                case SemanticTurnType.Humor:
+                case SemanticTurnType.Joke:
+                case SemanticTurnType.Greeting:
+                    route.KnowledgeNeed = KnowledgeNeed.None;
+                    route.SearchQuery = string.Empty;
+                    break;
+            }
         }
 
         private static string NormalizeSearchQuery(string value, KnowledgeNeed need)
@@ -151,6 +209,8 @@ namespace ErenshorDeepSims
         internal string Text;
         internal string Topic;
         internal List<string> Participants = new List<string>();
+        internal List<string> Witnesses = new List<string>();
+        internal string Zone = string.Empty;
         internal int Importance;
         internal double Novelty;
         internal long ThreadId;
@@ -177,6 +237,7 @@ namespace ErenshorDeepSims
         internal double Novelty;
         internal double Fatigue;
         internal double ConversationPotential;
+        internal List<string> EligibleSpeakers = new List<string>();
     }
 
     internal sealed class SocialSessionState
@@ -301,10 +362,19 @@ namespace ErenshorDeepSims
                     seed.Novelty = evt.Novelty;
                     seed.Fatigue = 0.0;
                     seed.ConversationPotential = Math.Min(1.0, (evt.Importance / 100.0) + (evt.Novelty * 0.5));
+                    seed.EligibleSpeakers.AddRange(evt.Witnesses);
                     if (seed.ExpiresUtc >= now) seeds.Add(seed);
                 }
             }
             return seeds;
+        }
+
+        internal static bool CanSpeakFirstPerson(SessionConversationSeed seed, string simName)
+        {
+            if (seed == null || string.IsNullOrWhiteSpace(simName)) return false;
+            for (int i = 0; i < seed.EligibleSpeakers.Count; i++)
+                if (string.Equals(seed.EligibleSpeakers[i], simName, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
         }
 
         internal string DescribeThread()
@@ -323,6 +393,8 @@ namespace ErenshorDeepSims
         {
             SessionSocialEvent evt = new SessionSocialEvent { Id = _nextEventId++, Utc = now, Type = type ?? "event", Text = Bound(text, 400), Topic = Bound(topic, 80), Provenance = provenance, Importance = Math.Max(0, Math.Min(100, importance)), Novelty = Math.Max(0.0, Math.Min(1.0, novelty)), ThreadId = thread };
             if (participants != null) for (int i = 0; i < participants.Count && i < 6; i++) if (!string.IsNullOrWhiteSpace(participants[i])) evt.Participants.Add(Bound(participants[i], 40));
+            // Capture witnesses at event time. A Sim joining later cannot use the event as its own memory.
+            evt.Witnesses.AddRange(evt.Participants);
             _events.Add(evt);
             while (_events.Count > MaxEvents) _events.RemoveAt(0);
         }
@@ -330,8 +402,91 @@ namespace ErenshorDeepSims
         private static string Bound(string value, int max) { string v = (value ?? string.Empty).Replace("\r", " ").Replace("\n", " ").Trim(); return v.Length <= max ? v : v.Substring(0, max).TrimEnd(); }
     }
 
+    internal static class DirectPreferenceTopicPolicy
+    {
+        // Maps an explicitly subjective player turn onto one of the existing bounded SoftPersona
+        // topic buckets. This never creates a world fact; it only allows an accepted, actually visible
+        // first-person opinion to become future tone continuity after the output boundary confirms it.
+        internal static string Resolve(string message, PartyReplyIntent intent)
+        {
+            if (!PartyReplyIntentClassifier.IsSubjective(intent) || string.IsNullOrWhiteSpace(message)) return string.Empty;
+            string m = message.ToLowerInvariant();
+            if (Regex.IsMatch(m, @"\b(?:class|tank|tanking|heal|healing|healer|dps|reroll|arcanist|druid|paladin|reaver|stormcaller|windblade|duelist)\b")) return "class_opinion";
+            if (Regex.IsMatch(m, @"\b(?:zone|place|area|vibe|atmosphere|scenery)\b")) return "zone_preference";
+            if (Regex.IsMatch(m, @"\b(?:pace|pull|pulls|fast|slow|careful)\b")) return "pace_preference";
+            if (Regex.IsMatch(m, @"\b(?:gear|armor|armour|weapon|looks|style|fashion)\b")) return "gear_aesthetics";
+            if (Regex.IsMatch(m, @"\b(?:enemy|enemies|mob|mobs|monster|monsters|encounter design)\b")) return "enemy_design";
+            if (Regex.IsMatch(m, @"\b(?:dungeon|dungeons|grind|grinding|camp|explore|exploring|adventure)\b")) return "future_activity";
+            if (Regex.IsMatch(m, @"\b(?:music|listen|listening|food|snack|weather|reading|book|watching)\b")) return "ordinary_downtime";
+            return string.Empty;
+        }
+
+        // A direct topic label is only permission to remember a preference if the accepted visible
+        // answer actually expresses one. Generic uncertainty/acknowledgement fallbacks remain useful
+        // conversation history, but must not harden into SoftPersona.
+        internal static bool CanEstablishFromVisible(string topicKey, string visibleText)
+        {
+            if (!PreferenceMemoryPolicy.IsEligible(topicKey, visibleText)) return false;
+            string t = visibleText.Trim().ToLowerInvariant();
+            if (Regex.IsMatch(t, @"\b(?:not sure|don't know|do not know|can't confirm|cannot confirm|couldn't confirm|no idea|i hear you|what part|can't say|cannot say)\b")) return false;
+            return Regex.IsMatch(t, @"\b(?:like|love|enjoy|prefer|rather|favorite|favourite|fun|good|great|nice|boring|stressful|hate|into it|not for me|i'd|i would|i'm|i am)\b");
+        }
+    }
+
+    internal static class ConnectedBanterThreadPolicy
+    {
+        internal const int ManualTailReplies = 1; // A -> B. A third turn remains optional, not automatic.
+
+        // The only legal seed for B is chat that has already become visible. The caller records A at
+        // the final output boundary before invoking this method. If the exact shown opener is not the
+        // newest visible line, the thread is stale or was preempted and must stop.
+        internal static bool TryBuildFromVisible(IList<ConversationLine> visible, string openerSpeaker, string openerText, out List<ConversationLine> thread)
+        {
+            thread = new List<ConversationLine>();
+            if (visible == null || visible.Count == 0 || string.IsNullOrWhiteSpace(openerSpeaker) || string.IsNullOrWhiteSpace(openerText)) return false;
+            ConversationLine newest = visible[visible.Count - 1];
+            if (newest == null || !string.Equals(newest.Speaker, openerSpeaker, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(newest.Text, openerText, StringComparison.Ordinal)) return false;
+            int start = Math.Max(0, visible.Count - 5);
+            for (int i = start; i < visible.Count; i++)
+            {
+                ConversationLine line = visible[i];
+                if (line != null && !string.IsNullOrWhiteSpace(line.Text)) thread.Add(new ConversationLine(line.Speaker, line.Text));
+            }
+            return thread.Count > 0;
+        }
+    }
+
     internal static class DirectResponseFallback
     {
+        internal static string ClassifyRejectionReason(string rejectionReason)
+        {
+            string reason = (rejectionReason ?? string.Empty).ToLowerInvariant();
+            if (reason.IndexOf("topic mismatch", StringComparison.Ordinal) >= 0) return "topic_mismatch";
+            if (reason.IndexOf("loot/acquisition", StringComparison.Ordinal) >= 0) return "loot_acquisition";
+            if (reason.IndexOf("relationship/entities", StringComparison.Ordinal) >= 0 ||
+                reason.IndexOf("retrieved game facts", StringComparison.Ordinal) >= 0) return "retrieved_relationship";
+            if (reason.IndexOf("kill/clear", StringComparison.Ordinal) >= 0) return "kill_clear";
+            return "other";
+        }
+
+        internal static string RenderAfterGroundingRejection(string message, string rejectionReason, SimSnapshot speaker)
+        {
+            string reason = (rejectionReason ?? string.Empty).ToLowerInvariant();
+            if (reason.IndexOf("loot/acquisition", StringComparison.Ordinal) >= 0) return "i can't confirm that item claim";
+            if (reason.IndexOf("kill/clear", StringComparison.Ordinal) >= 0) return "i can't confirm that happened";
+            if (reason.IndexOf("relationship/entities", StringComparison.Ordinal) >= 0 || reason.IndexOf("retrieved game facts", StringComparison.Ordinal) >= 0) return "i couldn't confirm that cleanly from what i found";
+            SemanticTurnRoute route = FallbackForRejectedDirect(message);
+            return Render(message, route, speaker, false);
+        }
+
+        private static SemanticTurnRoute FallbackForRejectedDirect(string message)
+        {
+            SemanticTurnRoute route = SemanticTurnRouter.Fallback(message);
+            if (route == null) route = new SemanticTurnRoute { TurnType = SemanticTurnType.Statement, KnowledgeNeed = KnowledgeNeed.None };
+            return route;
+        }
+
         internal static string Render(string message, SemanticTurnRoute route, SimSnapshot speaker, bool lookupFailed)
         {
             if (lookupFailed) return "couldn't find anything useful on that";
@@ -357,14 +512,49 @@ namespace ErenshorDeepSims
             List<string> lines = new List<string>();
             SemanticTurnRoute social = SemanticTurnRouter.Fallback("what are you guys reading tonight");
             lines.Add("[DeepSims Social] social question does not retrieve: " + Pass(social.KnowledgeNeed == KnowledgeNeed.None));
+            SemanticTurnRoute windbladeOpinion = new SemanticTurnRoute { TurnType = SemanticTurnType.Opinion, KnowledgeNeed = KnowledgeNeed.GameWiki, SearchQuery = "Windblade" };
+            SemanticTurnRouter.ApplyNoRetrievalRule(windbladeOpinion);
+            lines.Add("[DeepSims Social] Windblade opinion overrides class lookup: " + Pass(windbladeOpinion.KnowledgeNeed == KnowledgeNeed.None && windbladeOpinion.SearchQuery.Length == 0));
+            SemanticTurnRoute preference = SemanticTurnRouter.Fallback("dancer do you like being a windblade?");
+            lines.Add("[DeepSims Social] personal preference does not retrieve: " + Pass(preference.TurnType == SemanticTurnType.PersonalPreference && preference.KnowledgeNeed == KnowledgeNeed.None));
+            SemanticTurnRoute misroutedOpinion;
+            bool misroutedParsed = SemanticTurnRouter.TryParse("TurnType=DirectQuestion\nKnowledgeNeed=GameWiki\nTopic=Windblade\nSubject=Dancer class\nSearchQuery=Windblade\nConfidence=0.91\nDirectAnswerRequired=true",
+                "Dancer, do you like being a Windblade?", out misroutedOpinion);
+            lines.Add("[DeepSims Social] model-misrouted class opinion is forced back to social: " + Pass(misroutedParsed && misroutedOpinion.KnowledgeNeed == KnowledgeNeed.None && misroutedOpinion.SearchQuery.Length == 0));
+            SemanticTurnRoute enjoyTank = SemanticTurnRouter.Fallback("do you enjoy tanking?");
+            lines.Add("[DeepSims Social] enjoy-role opinion stays social: " + Pass(enjoyTank.KnowledgeNeed == KnowledgeNeed.None));
+            SemanticTurnRoute druidTaste = SemanticTurnRouter.Fallback("what do you think about being a Druid?");
+            lines.Add("[DeepSims Social] class-identity opinion stays social: " + Pass(druidTaste.KnowledgeNeed == KnowledgeNeed.None));
             SemanticTurnRoute game = SemanticTurnRouter.Fallback("where does wolf meat drop?");
             lines.Add("[DeepSims Social] game question uses wiki: " + Pass(game.KnowledgeNeed == KnowledgeNeed.GameWiki));
             lines.Add("[DeepSims Social] useful exact entity query: " + Pass(game.SearchQuery.IndexOf("Wolf Meat", StringComparison.OrdinalIgnoreCase) >= 0 && game.SearchQuery.Length < 60));
+            SemanticTurnRoute abilityFacts = SemanticTurnRouter.Fallback("what abilities do Windblades get?");
+            lines.Add("[DeepSims Social] factual class ability contrast still uses wiki: " + Pass(abilityFacts.KnowledgeNeed == KnowledgeNeed.GameWiki));
             SemanticTurnRoute news = SemanticTurnRouter.Fallback("did anything happen with SpaceX today?");
             lines.Add("[DeepSims Social] current outside-world question uses news: " + Pass(news.KnowledgeNeed == KnowledgeNeed.ExternalNews));
             lines.Add("[DeepSims Social] lookup acknowledgement is visible: " + Pass(SemanticTurnRouter.LookupAcknowledgement(new SimSnapshot { Name = "Fiora" }, news).Length > 5));
             lines.Add("[DeepSims Social] lookup failure still replies: " + Pass(DirectResponseFallback.Render("where?", game, null, true).Length > 0));
             lines.Add("[DeepSims Social] direct opinion fallback stays relevant: " + Pass(DirectResponseFallback.Render("i like being the tank", social, null, false).IndexOf("tank", StringComparison.OrdinalIgnoreCase) >= 0));
+            lines.Add("[DeepSims Social] topic-mismatch direct rejection has fallback: " + Pass(DirectResponseFallback.RenderAfterGroundingRejection("do you like being a Windblade?", "topic mismatch for selected class_opinion", null).Length > 0));
+            lines.Add("[DeepSims Social] loot/acquisition direct rejection has fallback: " + Pass(DirectResponseFallback.RenderAfterGroundingRejection("did we get that item?", "unsupported loot/acquisition assertion", null).Length > 0));
+            lines.Add("[DeepSims Social] retrieved-relationship direct rejection has fallback: " + Pass(DirectResponseFallback.RenderAfterGroundingRejection("where does it come from?", "answer relationship/entities are not supported by the retrieved game facts", null).Length > 0));
+            lines.Add("[DeepSims Social] kill/clear direct rejection has fallback: " + Pass(DirectResponseFallback.RenderAfterGroundingRejection("did we clear that?", "unsupported kill/clear assertion", null).Length > 0));
+            lines.Add("[DeepSims Social] rejection categories are privacy-safe and stable: " + Pass(
+                DirectResponseFallback.ClassifyRejectionReason("topic mismatch for selected other_sim_preference") == "topic_mismatch" &&
+                DirectResponseFallback.ClassifyRejectionReason("unsupported loot/acquisition assertion") == "loot_acquisition" &&
+                DirectResponseFallback.ClassifyRejectionReason("answer relationship/entities are not supported by the retrieved game facts") == "retrieved_relationship" &&
+                DirectResponseFallback.ClassifyRejectionReason("unsupported kill/clear assertion") == "kill_clear"));
+            lines.Add("[DeepSims Social] direct class opinion gets SoftPersona topic: " + Pass(DirectPreferenceTopicPolicy.Resolve("Dancer, do you like being a Windblade?", PartyReplyIntent.Opinion) == "class_opinion"));
+            lines.Add("[DeepSims Social] direct reading opinion gets downtime SoftPersona topic: " + Pass(DirectPreferenceTopicPolicy.Resolve("what are you reading tonight?", PartyReplyIntent.SocialBanter) == "ordinary_downtime"));
+            lines.Add("[DeepSims Social] factual turn never becomes SoftPersona: " + Pass(DirectPreferenceTopicPolicy.Resolve("what abilities do Windblades get?", PartyReplyIntent.FactualGameQuestion).Length == 0));
+            lines.Add("[DeepSims Social] actual visible opinion may establish SoftPersona: " + Pass(DirectPreferenceTopicPolicy.CanEstablishFromVisible("class_opinion", "i like being a windblade")));
+            lines.Add("[DeepSims Social] generic direct fallback does not become SoftPersona: " + Pass(!DirectPreferenceTopicPolicy.CanEstablishFromVisible("class_opinion", "not sure on that one")));
+
+            List<SimPreferenceMemory> rememberedPrefs = new List<SimPreferenceMemory>();
+            rememberedPrefs.Add(new SimPreferenceMemory { TopicKey = "class_opinion", Statement = "i like being a windblade", TimesExpressed = 1 });
+            lines.Add("[DeepSims Social] class-name question retrieves prior SoftPersona: " + Pass(PreferenceMemoryPolicy.Select(rememberedPrefs, "do you like being a Windblade?", 1).Count == 1));
+            rememberedPrefs.Add(new SimPreferenceMemory { TopicKey = "ordinary_downtime", Statement = "i am reading an old travel journal", TimesExpressed = 1 });
+            lines.Add("[DeepSims Social] reading question retrieves prior downtime SoftPersona: " + Pass(PreferenceMemoryPolicy.Select(rememberedPrefs, "what are you reading tonight?", 1).Count == 1));
 
             SocialSessionState state = new SocialSessionState();
             state.ResetForCharacter("slot-1-a");
@@ -373,6 +563,16 @@ namespace ErenshorDeepSims
             state.RecordVisibleSim("Phanty", "healing has its own kind of stress too", DateTime.UtcNow);
             List<SessionChatLine> recent = state.RecentChat();
             lines.Add("[DeepSims Social] Sim B receives Sim A visible history: " + Pass(recent.Count == 3 && recent[1].Speaker == "Fiora" && recent[2].Speaker == "Phanty"));
+            List<ConversationLine> visibleBanter = new List<ConversationLine>();
+            visibleBanter.Add(new ConversationLine("Astra", "windblade looks fun to me"));
+            List<ConversationLine> banterThread;
+            bool banterBuilt = ConnectedBanterThreadPolicy.TryBuildFromVisible(visibleBanter, "Astra", "windblade looks fun to me", out banterThread);
+            lines.Add("[DeepSims Social] connected banter B receives exact accepted A text: " + Pass(banterBuilt && banterThread.Count == 1 && banterThread[0].Text == "windblade looks fun to me"));
+            List<ConversationLine> rejectedCandidateNotVisible;
+            bool rejectedSeeded = ConnectedBanterThreadPolicy.TryBuildFromVisible(visibleBanter, "Astra", "unshown rejected candidate", out rejectedCandidateNotVisible);
+            lines.Add("[DeepSims Social] rejected unshown A cannot seed B: " + Pass(!rejectedSeeded));
+            lines.Add("[DeepSims Social] manual connected banter hard maximum is A plus one tail: " + Pass(ConnectedBanterThreadPolicy.ManualTailReplies == 1));
+            lines.Add("[DeepSims Social] player generation preempts autonomous tail: " + Pass(ConversationTurnGuard.IsStale(4, 5)));
             long continued = state.BeginPlayerTurn("Player", "yeah, but healing looks fun too", "class role preferences", DateTime.UtcNow.AddSeconds(4));
             lines.Add("[DeepSims Social] player continues active thread: " + Pass(continued == thread));
             lines.Add("[DeepSims Social] conversation budget stops tails: " + Pass(!state.CanAddThreadReply(2)));
@@ -385,6 +585,13 @@ namespace ErenshorDeepSims
             lines.Add("[DeepSims Social] rolling summary bounded: " + Pass(state.Summary().Length <= 1200));
             lines.Add("[DeepSims Social] reflection consumes delta only: " + Pass(state.ReflectionDelta().Count == 0));
             lines.Add("[DeepSims Social] actual events produce seeds: " + Pass(state.BuildSeeds(DateTime.UtcNow).Count > 0));
+            SocialSessionState witnessState = new SocialSessionState();
+            witnessState.ResetForCharacter("slot-witness");
+            witnessState.RecordEvent("expedition", "Reached Bonepits.", "bonepits", SessionEventProvenance.VerifiedWorld,
+                new string[] { "Brinon", "Fiora", "Phanty", "Dancer" }, 60, DateTime.UtcNow);
+            List<SessionConversationSeed> witnessedSeeds = witnessState.BuildSeeds(DateTime.UtcNow);
+            lines.Add("[DeepSims Social] new Sim cannot claim unwitnessed session event: " + Pass(witnessedSeeds.Count == 1 && !SocialSessionState.CanSpeakFirstPerson(witnessedSeeds[0], "Astra")));
+            lines.Add("[DeepSims Social] witness can use shared event seed: " + Pass(witnessedSeeds.Count == 1 && SocialSessionState.CanSpeakFirstPerson(witnessedSeeds[0], "Dancer")));
             lines.Add("[DeepSims Social] stale seeds expire: " + Pass(state.BuildSeeds(DateTime.UtcNow.AddHours(2)).Count == 0));
             state.ResetForCharacter("slot-2-b");
             lines.Add("[DeepSims Social] no cross-character session leakage: " + Pass(state.RecentChat().Count == 0 && state.ReflectionDelta().Count == 0));
@@ -404,6 +611,11 @@ namespace ErenshorDeepSims
                 if (compact[i] != null && compact[i].content != null && compact[i].content.IndexOf("what do you like about them?", StringComparison.Ordinal) >= 0) currentPreserved = true;
             lines.Add("[DeepSims Social] compact direct prompt fits numCtx=2048: " + Pass(PromptBuilder.EstimateTokenCount(compact) < 1500));
             lines.Add("[DeepSims Social] compact prompt preserves newest player turn: " + Pass(currentPreserved));
+            GroupMessageQueue queue = new GroupMessageQueue();
+            ConnectedBanterPlan plan = new ConnectedBanterPlan { RemainingReplies = 1, TopicKey = "class_opinion", ManualThread = true };
+            queue.Enqueue(DateTime.UtcNow.AddSeconds(-1), "Astra", "visible opener", true, 5, "manual_banter", 1, 1, "sim:astra", "manual_banter", DateTime.UtcNow, 2, "class_opinion", plan);
+            List<ScheduledGroupMessage> scheduled = queue.TakeDue(DateTime.UtcNow);
+            lines.Add("[DeepSims Social] queue preserves visible-only continuation metadata: " + Pass(scheduled.Count == 1 && scheduled[0].ConnectedBanter == plan && scheduled[0].SoftPreferenceTopicKey == "class_opinion"));
             return lines;
         }
 

@@ -392,6 +392,15 @@ namespace ErenshorDeepSims
         internal long LastConversationId;
     }
 
+    internal sealed class TopicRejectionUsage
+    {
+        internal string TopicKey;
+        internal string Speaker;
+        internal DateTime LastRejectedUtc;
+        internal int RecentRejectCount;
+        internal string LastReason;
+    }
+
     // Transient, bounded record of which subjects were actually said recently.  Nothing here is
     // persisted: choosing a topic is not a memory, and a topic is only recorded once a line has
     // actually been emitted.
@@ -402,12 +411,16 @@ namespace ErenshorDeepSims
         private const double VeryRecentSeconds = 90.0;
         private const double GroupRecentSeconds = 120.0;
         private const double SpeakerRepeatSeconds = 600.0;
+        private const double RejectionWindowSeconds = 180.0;
+        private const int MaxTrackedRejections = 32;
 
         private readonly object _lock = new object();
         private readonly Dictionary<string, TopicUsage> _usage =
             new Dictionary<string, TopicUsage>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, DateTime> _groups =
             new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, TopicRejectionUsage> _rejections =
+            new Dictionary<string, TopicRejectionUsage>(StringComparer.OrdinalIgnoreCase);
 
         private readonly double _fatigueSeconds;
         private readonly double _recentWindowSeconds;
@@ -440,6 +453,29 @@ namespace ErenshorDeepSims
                 usage.LastSpeaker = speaker ?? string.Empty;
                 usage.LastConversationId = conversationId;
                 _groups[usage.CooldownGroup] = now;
+                PruneLocked(now);
+            }
+        }
+
+        internal void NoteRejected(string topicKey, string speaker, string reason, DateTime now)
+        {
+            if (string.IsNullOrWhiteSpace(topicKey)) return;
+            string who = string.IsNullOrWhiteSpace(speaker) ? "*" : speaker.Trim();
+            string key = topicKey.Trim() + "|" + who;
+            lock (_lock)
+            {
+                PruneLocked(now);
+                TopicRejectionUsage usage;
+                if (!_rejections.TryGetValue(key, out usage))
+                {
+                    usage = new TopicRejectionUsage { TopicKey = topicKey.Trim(), Speaker = who };
+                    _rejections[key] = usage;
+                }
+                if (usage.LastRejectedUtc != DateTime.MinValue &&
+                    (now - usage.LastRejectedUtc).TotalSeconds > RejectionWindowSeconds) usage.RecentRejectCount = 0;
+                usage.LastRejectedUtc = now;
+                usage.RecentRejectCount = Math.Min(4, usage.RecentRejectCount + 1);
+                usage.LastReason = string.IsNullOrWhiteSpace(reason) ? "rejected" : reason.Trim();
                 PruneLocked(now);
             }
         }
@@ -486,6 +522,21 @@ namespace ErenshorDeepSims
                         penalty += cumulative;
                         if (notes.Length > 0) notes.Append(", ");
                         notes.Append(usage.RecentUseCount + " recent uses");
+                    }
+                }
+
+                string rejectionKey = topicKey.Trim() + "|" + (string.IsNullOrWhiteSpace(speaker) ? "*" : speaker.Trim());
+                TopicRejectionUsage rejected;
+                if (_rejections.TryGetValue(rejectionKey, out rejected) && rejected.LastRejectedUtc != DateTime.MinValue)
+                {
+                    double rejectAge = (now - rejected.LastRejectedUtc).TotalSeconds;
+                    if (rejectAge < RejectionWindowSeconds)
+                    {
+                        double rejectPenalty = rejectAge < 20.0 ? 24.0 : rejectAge < 60.0 ? 14.0 : 6.0;
+                        rejectPenalty += Math.Min(18.0, Math.Max(0, rejected.RecentRejectCount - 1) * 6.0);
+                        penalty += rejectPenalty;
+                        if (notes.Length > 0) notes.Append(", ");
+                        notes.Append("recent grounding rejection");
                     }
                 }
 
@@ -536,6 +587,7 @@ namespace ErenshorDeepSims
             {
                 _usage.Clear();
                 _groups.Clear();
+                _rejections.Clear();
             }
         }
 
@@ -568,6 +620,26 @@ namespace ErenshorDeepSims
                     if (pair.Value < oldestUtc) { oldestUtc = pair.Value; oldest = pair.Key; }
                 if (oldest == null) break;
                 _groups.Remove(oldest);
+            }
+
+            if (_rejections.Count > 4)
+            {
+                List<string> rejectedRemove = null;
+                foreach (KeyValuePair<string, TopicRejectionUsage> pair in _rejections)
+                    if (pair.Value == null || pair.Value.LastRejectedUtc == DateTime.MinValue ||
+                        (now - pair.Value.LastRejectedUtc).TotalSeconds > RejectionWindowSeconds)
+                        (rejectedRemove ?? (rejectedRemove = new List<string>())).Add(pair.Key);
+                if (rejectedRemove != null) for (int i = 0; i < rejectedRemove.Count; i++) _rejections.Remove(rejectedRemove[i]);
+            }
+            while (_rejections.Count > MaxTrackedRejections)
+            {
+                string oldestRejected = null;
+                DateTime oldestRejectedUtc = DateTime.MaxValue;
+                foreach (KeyValuePair<string, TopicRejectionUsage> pair in _rejections)
+                    if (pair.Value != null && pair.Value.LastRejectedUtc < oldestRejectedUtc)
+                    { oldestRejectedUtc = pair.Value.LastRejectedUtc; oldestRejected = pair.Key; }
+                if (oldestRejected == null) break;
+                _rejections.Remove(oldestRejected);
             }
         }
 
@@ -618,6 +690,30 @@ namespace ErenshorDeepSims
         internal List<string> SpeakerCandidates = new List<string>();
 
         internal bool SilenceWon { get { return string.IsNullOrEmpty(SelectedTopicKey); } }
+    }
+
+    internal static class AmbientSeedPrerequisitePolicy
+    {
+        // Reject semantic seeds whose missing participant is already knowable before generation.
+        // This is intentionally tiny: all fact/memory provenance remains owned by the existing
+        // candidate Fact/FactSource and per-speaker eligibility contracts.
+        internal static bool IsSupported(AmbientSeedCandidate candidate, IList<SimSnapshot> speakers, out string reason)
+        {
+            reason = string.Empty;
+            if (candidate == null) { reason = "missing candidate"; return false; }
+            string key = (candidate.TopicKey ?? string.Empty).Trim().ToLowerInvariant();
+            bool needsAnotherSim = key == "other_sim_preference" || key == "party_preferences" || key == "rp_companions";
+            if (!needsAnotherSim) return true;
+            int eligible = 0;
+            for (int i = 0; speakers != null && i < speakers.Count; i++)
+            {
+                SimSnapshot sim = speakers[i];
+                if (sim != null && !string.IsNullOrWhiteSpace(sim.Name) && candidate.IsEligibleSpeaker(sim.Name)) eligible++;
+            }
+            if (eligible >= 2) return true;
+            reason = "requires another visible eligible Sim";
+            return false;
+        }
     }
 
     internal static class AmbientSeedSelector
@@ -709,6 +805,12 @@ namespace ErenshorDeepSims
                 if (candidate.HasFact && candidate.FactSource.Length == 0)
                 {
                     decision.Candidates.Add(Excluded(candidate.TopicKey, "unsupported provenance"));
+                    continue;
+                }
+                string prerequisiteReason;
+                if (!AmbientSeedPrerequisitePolicy.IsSupported(candidate, speakers, out prerequisiteReason))
+                {
+                    decision.Candidates.Add(Excluded(candidate.TopicKey, prerequisiteReason));
                     continue;
                 }
 

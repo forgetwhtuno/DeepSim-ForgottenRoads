@@ -148,6 +148,19 @@ namespace ErenshorDeepSims
             _seedDiagnostics.NoteEmitted(evt.OpportunityId, speaker);
         }
 
+        // A failed generation does not mean the topic became "used", but repeating the same
+        // topic/speaker immediately is wasteful when the verifier has already shown that this exact
+        // attempt shape is unreliable. Keep a short, in-memory negative admission signal that decays
+        // on its own; a later successful visible line still uses the ordinary NoteUsed path above.
+        internal void NoteAmbientTopicRejected(SocialIntent intent, string speaker, string reason)
+        {
+            if (intent == null || !string.Equals(intent.Source, "seed", StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(intent.TopicKey)) return;
+            _topicFatigue.NoteRejected(intent.TopicKey, speaker, reason, DateTime.UtcNow);
+            VerboseDebug("ambient topic temporarily penalized after verifier rejection: topic=" +
+                intent.TopicKey + " speaker=" + (speaker ?? "?") + " reason=" + (reason ?? "rejected"));
+        }
+
         internal void SetManualCamp(bool enabled)
         {
             if (enabled && _relaxActive)
@@ -424,6 +437,9 @@ namespace ErenshorDeepSims
 
         internal void ForceBanter()
         {
+            // Manual banter now uses the same seed -> grounding -> shared queue -> continuation
+            // architecture as normal social speech. DeepSimsPlugin arms exactly one continuation only
+            // after the opener is actually visible, so this remains a bounded A -> B diagnostic thread.
             _plugin.QueueAutonomousReaction(BuildForcedEvent("manual_banter_test"), null, true, true);
             _lastAutonomousUtc = DateTime.UtcNow;
             NoteSocialActivity(DateTime.UtcNow);

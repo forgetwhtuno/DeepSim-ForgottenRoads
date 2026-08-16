@@ -240,12 +240,12 @@ If Deep Sims does not appear:
 
 ## Related mods
 
-- [Erenshor Practice Duels](https://github.com/forgetwhtuno/Erenshor-Duel): friendly, non-lethal virtual-health duels with local Sims.
-- [Erenshor PvP](https://github.com/forgetwhtuno/Erenshor-PvP): standalone off-map Sim-profile PvP encounters.
-- [Erenshor Follow](https://github.com/forgetwhtuno/ErenshorFollow): deterministic player follow, Sim-led travel, and expeditions.
-- [Erenshor Party Tools](https://github.com/forgetwhtuno/Erenshor-PartyTools): ready checks, cosmetic rolls, friend availability, and a compact command panel.
-- [Erenshor Campmaster](https://github.com/forgetwhtuno/Erenshor-Campmaster): read-only Hunt Camp and Relax social-context modes.
-- [Erenshor Nemesis](https://github.com/forgetwhtuno/Erenshor-Nemesis): an optional persistent rival system that can use PvP results when PvP is installed.
+- [Forgotten Roads: Practice Duel](https://github.com/forgetwhtuno/ForgottenRoads-Duel): friendly, non-lethal virtual-health duels with local Sims.
+- [Forgotten Roads: PvP](https://github.com/forgetwhtuno/ForgottenRoads-PvP): standalone off-map Sim-profile PvP encounters.
+- [Forgotten Roads: Follow](https://github.com/forgetwhtuno/ForgottenRoadsFollow): deterministic player follow, Sim-led travel, and expeditions.
+- [Forgotten Roads: Party Tools](https://github.com/forgetwhtuno/ForgottenRoads-PartyTools): ready checks, cosmetic rolls, friend availability, and a compact command panel.
+- [Forgotten Roads: Campmaster](https://github.com/forgetwhtuno/ForgottenRoads-Campmaster): read-only Hunt Camp and Relax social-context modes.
+- [Forgotten Roads: Nemesis](https://github.com/forgetwhtuno/ForgottenRoads-Nemesis): an optional persistent rival system that can use PvP results when PvP is installed.
 
 ## Credits and inspiration
 

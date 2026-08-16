@@ -1,3 +1,23 @@
+## 0.7.3 development — coherent party conversation / session routing
+
+- Routes each player party-chat turn through a compact semantic classification step before retrieval or response generation.
+- Makes direct player social turns response-owned: a verified current party Sim acknowledges retrieval and a safe relevant fallback remains available after model/grounding failure.
+- Adds bounded, character-scoped recent visible chat, event journal, rolling session summary, structured conversation seeds, and hidden non-visible reflection.
+- Builds compact direct-response prompts around confirmed `LivePartyFacts`, relevant memory, bounded retrieval evidence, and the most recent visible thread lines.
+- Adds `/dssession summary|recent`, `/dsseeds recent`, and `/dsthread status` diagnostics.
+- Keeps normal-frame inference, request-pump, heartbeat, and accepted-grounding details behind verbose logging.
+
+## 0.7.2 development — live party facts / party grounding
+
+- Added immutable typed `LivePartyFacts` captured from the proven native `GameData.GroupMembers` authority, with process-session `SimPlayerTracking` identity, actor kind, tri-state presence/online facts, membership state, and a deterministic membership fingerprint/version.
+- Manual Deep Sim slots are now enhancement filters over the native roster; they cannot fabricate grouped membership. Remote COOP humans can be represented as context when the existing COOP group/peer bridge proves them, but remote humans and remote Sims remain ineligible generated speakers.
+- Preserved the zoning empty-roster tolerance while changing its semantics to `transition_uncertain`; retained transition context is never exposed as confirmed current membership.
+- Added explicit authoritative live-party prompt facts and recapture/revalidation at inference, post-inference grounding, retry, queued display, and the final visible write boundary. Continuation turns capture a fresh roster each turn.
+- Historical `group_join` / `group_leave` records are excluded from current-state memory retrieval and grounding corpora so history cannot certify present membership.
+- Added a deterministic final `PartyStanceGuard`: conflicting invitation/join/external-availability/come-with-party language from an already-grouped Sim is narrowly rewritten when safe or rejected as `NO_MESSAGE` without a repair LLM call.
+- Added privacy-safe party-grounding diagnostics containing request/path/version/age/counts/speaker kind/status/staleness/stance/disposition, but never prompt or private memory text.
+- Added deterministic regression coverage for grouped stance conflicts, non-party unknown availability, join/leave/rejoin, zoning uncertainty, roster-order stability, in-flight and queued staleness, manual-slot authority, same-name identity, historical-membership suppression, remote-human context, and explicit prompt facts.
+
 ## 0.7.1 development — native Lunaris migration
 
 - Migrated the Deep Sims plugin host from BepInEx `BaseUnityPlugin` to native `LunarisPlugin` metadata and permissions. Harmony remains intentionally retained for verified Erenshor hooks and the existing rich chat-command parser.

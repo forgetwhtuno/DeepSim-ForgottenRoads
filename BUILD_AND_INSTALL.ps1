@@ -160,7 +160,7 @@ try {
     $lunarisInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($LunarisDll)
     $lunarisHash = (Get-FileHash -Algorithm SHA256 -Path $LunarisDll).Hash.ToLowerInvariant()
 
-    Write-Host "Building Deep Sims 0.7.1 as a native Lunaris plugin..." -ForegroundColor Cyan
+    Write-Host "Building Deep Sims 0.7.3 as a native Lunaris plugin..." -ForegroundColor Cyan
     Write-Host "  Game:    $GameDir"
     Write-Host "  Lunaris: $LunarisDll"
     Write-Host "  Version: $($lunarisInfo.FileVersion)"
@@ -174,7 +174,7 @@ try {
     Copy-Item -LiteralPath $TempDll -Destination $OutDll -Force
 
     Write-Host ""
-    Write-Host "Deep Sims 0.7.1 installed as a native Lunaris plugin." -ForegroundColor Green
+    Write-Host "Deep Sims 0.7.3 installed as a native Lunaris plugin." -ForegroundColor Green
     Write-Host "  Plugin: $OutDll"
     Write-Host "  Config: $ConfigRoot\erenshordeepsims.lpcfg"
     Write-Host "  Memory: $MemoryDir"
@@ -186,10 +186,11 @@ finally {
     if (Test-Path $TempDir) { Remove-Item -LiteralPath $TempDir -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
-Invoke-OptionalModBuild "Erenshor Follow" (Join-Path $ScriptRoot "ErenshorFollow") $GameDir
-Invoke-OptionalModBuild "Practice Duels" (Join-Path $ScriptRoot "ErenshorDuel") $GameDir
-Invoke-OptionalModBuild "Erenshor PvP" (Join-Path $ScriptRoot "Erenshor-PvP") $GameDir
-Invoke-OptionalModBuild "Erenshor Nemesis" (Join-Path $ScriptRoot "Erenshor-Nemesis") $GameDir
-Invoke-OptionalModBuild "Erenshor Party Tools" (Join-Path $ScriptRoot "Erenshor-Party-Tools") $GameDir
-Invoke-OptionalModBuild "Erenshor Campmaster" (Join-Path $ScriptRoot "ErenShorCampRelax") $GameDir
-Invoke-OptionalModBuild "Erenshor Crafting Expanded" (Join-Path $ScriptRoot "Erenshor-Crafting-Expanded") $GameDir
+$WorkspaceModsDir = Split-Path -Parent $ScriptRoot
+Invoke-OptionalModBuild "Erenshor Follow" (Join-Path $WorkspaceModsDir "ErenshorFollow") $GameDir
+Invoke-OptionalModBuild "Practice Duels" (Join-Path $WorkspaceModsDir "Erenshor-Duel") $GameDir
+Invoke-OptionalModBuild "Erenshor PvP" (Join-Path $WorkspaceModsDir "Erenshor-PvP") $GameDir
+Invoke-OptionalModBuild "Erenshor Nemesis" (Join-Path $WorkspaceModsDir "Erenshor-Nemesis") $GameDir
+Invoke-OptionalModBuild "Erenshor Party Tools" (Join-Path $WorkspaceModsDir "Erenshor-PartyTools") $GameDir
+Invoke-OptionalModBuild "Erenshor Campmaster" (Join-Path $WorkspaceModsDir "Erenshor-Campmaster") $GameDir
+Invoke-OptionalModBuild "Erenshor Crafting Expanded" (Join-Path $WorkspaceModsDir "Erenshor-Crafting-Expanded") $GameDir

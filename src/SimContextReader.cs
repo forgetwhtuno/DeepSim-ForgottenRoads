@@ -160,7 +160,7 @@ namespace ErenshorDeepSims
                 foreach (object item in active)
                 {
                     SimPlayer sim = item as SimPlayer;
-                    if (sim == null || CoopCompatibility.IsRemoteCoopHuman(sim)) continue;
+                    if (sim == null || CoopCompatibility.IsRemoteCoopHuman(sim) || CoopCompatibility.IsRemoteCoopSim(sim)) continue;
                     SimSnapshot snapshot = BuildSnapshot(sim);
                     if (snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Name)) list.Add(snapshot);
                 }
@@ -171,7 +171,7 @@ namespace ErenshorDeepSims
             for (int i = 0; i < fallback.Length; i++)
             {
                 SimPlayer sim = fallback[i];
-                if (sim == null || CoopCompatibility.IsRemoteCoopHuman(sim)) continue;
+                if (sim == null || CoopCompatibility.IsRemoteCoopHuman(sim) || CoopCompatibility.IsRemoteCoopSim(sim)) continue;
                 SimSnapshot snapshot = BuildSnapshot(sim);
                 if (snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Name)) list.Add(snapshot);
             }
@@ -191,11 +191,12 @@ namespace ErenshorDeepSims
         internal static SimSnapshot BuildSnapshot(SimPlayer sim)
         {
             if (sim == null) return null;
-            if (CoopCompatibility.IsRemoteCoopHuman(sim)) return null;
+            try { if (CoopCompatibility.IsRemoteCoopHuman(sim) || CoopCompatibility.IsRemoteCoopSim(sim)) return null; } catch { }
             SimProfile profile = GetProfile(sim);
 
             SimSnapshot s = new SimSnapshot();
             s.RuntimeSim = sim;
+            s.PartyActorId = PartyActorIdentity.ForSim(sim);
             s.Scene = CurrentSceneName();
 
             // Static half, resolved once per Sim object.

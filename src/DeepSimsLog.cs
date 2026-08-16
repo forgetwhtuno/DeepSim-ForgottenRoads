@@ -1,5 +1,10 @@
 namespace ErenshorDeepSims
 {
+    internal static class DeepSimsDiagnostics
+    {
+        internal static volatile bool Verbose;
+    }
+
     // Loader-neutral logging surface so the social/memory/network subsystems do not depend on
     // BepInEx or Lunaris implementation types.
     internal interface IDeepSimsLog

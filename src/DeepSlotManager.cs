@@ -36,7 +36,10 @@ namespace ErenshorDeepSims
             // collection is exposed by the game, DeepSims intentionally enhances only five.
             maxSlots = Math.Max(1, Math.Min(5, maxSlots));
             List<SimSnapshot> activeSims = SimContextReader.GetActiveSims();
-            List<string> candidates = ManualMode ? ParseManualCandidates() : PartyResolver.ResolvePartyMemberNames(activeSims);
+            // Native party authority always decides grouped membership. Manual slots are only an
+            // enhancement filter over that native roster; they can never fabricate grouped=true.
+            List<string> nativeCandidates = PartyResolver.ResolvePartyMemberNames(activeSims);
+            List<string> candidates = ManualMode ? DeepSlotSelectionPolicy.FilterManualNativeCandidates(nativeCandidates, _manualSlots) : nativeCandidates;
 
             // Scene transitions and some Erenshor spawn cycles can briefly expose no party collection.
             // Keep existing slots through a short empty window so zoning does not look like a new friendship session.
@@ -160,16 +163,6 @@ namespace ErenshorDeepSims
             return string.Join(" | ", parts.ToArray()) + (ManualMode ? " [manual]" : " [auto]");
         }
 
-        private List<string> ParseManualCandidates()
-        {
-            List<string> names = new List<string>();
-            string[] split = _manualSlots.Split(new char[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries);
-            for (int i = 0; i < split.Length; i++)
-            {
-                string n = split[i].Trim();
-                if (!string.IsNullOrWhiteSpace(n)) names.Add(n);
-            }
-            return names;
-        }
+
     }
 }

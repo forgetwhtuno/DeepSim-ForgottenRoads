@@ -407,22 +407,11 @@ namespace ErenshorDeepSims
             bool question = LooksLikeQuestion(message);
             bool trivial = LooksTrivial(message);
 
-            double chance;
-            if (direct) chance = 1.0;
-            else if (question) chance = 1.0;
-            else if (trivial) chance = 0.08;
-            // A real player opinion is conversational material, not ambient noise.  Keep silence
-            // possible, but do not make it less likely than an unrelated idle seed.
-            else chance = message.Trim().Length >= 16 ? 0.85 : 0.48;
-
-            if (_random.NextDouble() > chance)
-            {
-                _plugin.SetResponseStatus("idle", "no reply selected for casual party chat");
-                return;
-            }
-
+            // Anything reaching this handler is a normal player-authored social turn; tactical
+            // commands were already handed back to Erenshor. Player turns therefore own a visible
+            // response path. Silence remains valid only for autonomous opportunities.
             bool allowFollowUp = !trivial && active.Count > 1;
-            bool guaranteeResponse = direct || question || (!trivial && message.Trim().Length >= 16);
+            bool guaranteeResponse = true;
             _plugin.QueuePartyChatResponse(message, preferred, allowFollowUp, guaranteeResponse);
         }
 

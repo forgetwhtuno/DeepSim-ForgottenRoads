@@ -1301,7 +1301,9 @@ namespace ErenshorDeepSims
                     MemoryEvent evt = memory.RecentEvents[i];
                     if (evt == null) continue;
                     if (string.Equals(evt.type, "deep_group_chat", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(evt.type, "conversation", StringComparison.OrdinalIgnoreCase)) continue;
+                        string.Equals(evt.type, "conversation", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(evt.type, "group_join", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(evt.type, "group_leave", StringComparison.OrdinalIgnoreCase)) continue;
                     sb.AppendLine(evt.text ?? string.Empty);
                 }
             return sb.ToString();
@@ -1366,7 +1368,9 @@ namespace ErenshorDeepSims
                         MemoryEvent evt = memory.RecentEvents[i];
                         if (evt == null) continue;
                         if (string.Equals(evt.type, "deep_group_chat", StringComparison.OrdinalIgnoreCase) ||
-                            string.Equals(evt.type, "conversation", StringComparison.OrdinalIgnoreCase)) continue;
+                            string.Equals(evt.type, "conversation", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(evt.type, "group_join", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(evt.type, "group_leave", StringComparison.OrdinalIgnoreCase)) continue;
                         sb.AppendLine(evt.text ?? string.Empty);
                     }
             }

@@ -14,6 +14,12 @@ namespace ErenshorDeepSims
         internal bool Autonomous;
         internal int ConversationGeneration = -1;
         internal string DiagnosticContext = string.Empty;
+        internal long PartyRequestId;
+        internal long MembershipVersion = -1;
+        internal string SpeakerActorId = string.Empty;
+        internal string GenerationPath = string.Empty;
+        internal DateTime PartySnapshotCapturedUtc;
+        internal int EligibleSpeakerCount;
     }
 
     internal class GroupMessageQueue
@@ -22,7 +28,9 @@ namespace ErenshorDeepSims
         private readonly List<ScheduledGroupMessage> _items = new List<ScheduledGroupMessage>();
 
         internal void Enqueue(DateTime dueUtc, string speaker, string text, bool autonomous = false,
-            int conversationGeneration = -1, string diagnosticContext = null)
+            int conversationGeneration = -1, string diagnosticContext = null, long partyRequestId = 0,
+            long membershipVersion = -1, string speakerActorId = null, string generationPath = null,
+            DateTime partySnapshotCapturedUtc = default(DateTime), int eligibleSpeakerCount = 0)
         {
             if (string.IsNullOrWhiteSpace(speaker) || string.IsNullOrWhiteSpace(text)) return;
             lock (_lock)
@@ -35,6 +43,12 @@ namespace ErenshorDeepSims
                 item.Autonomous = autonomous;
                 item.ConversationGeneration = conversationGeneration;
                 item.DiagnosticContext = diagnosticContext ?? string.Empty;
+                item.PartyRequestId = partyRequestId;
+                item.MembershipVersion = membershipVersion;
+                item.SpeakerActorId = speakerActorId ?? string.Empty;
+                item.GenerationPath = generationPath ?? string.Empty;
+                item.PartySnapshotCapturedUtc = partySnapshotCapturedUtc;
+                item.EligibleSpeakerCount = Math.Max(0, eligibleSpeakerCount);
                 _items.Add(item);
                 _items.Sort(delegate(ScheduledGroupMessage a, ScheduledGroupMessage b) { return a.DueUtc.CompareTo(b.DueUtc); });
             }

@@ -63,6 +63,16 @@ namespace ErenshorDeepSims
             return Eq(t, "/dssession") || Eq(t, "/dsouting");
         }
 
+        internal static bool TryParseSession(string raw, out string argument)
+        {
+            return TryParseSimpleArgument(raw, "/dssession", out argument);
+        }
+
+        internal static bool TryParseThread(string raw, out string argument)
+        {
+            return TryParseSimpleArgument(raw, "/dsthread", out argument);
+        }
+
         internal static bool IsPerfStatus(string raw)
         {
             string t = Trim(raw);
@@ -101,6 +111,18 @@ namespace ErenshorDeepSims
             if (string.IsNullOrWhiteSpace(raw)) return false;
             string t = raw.Trim();
             const string prefix = "/dscamp";
+            if (!t.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return false;
+            if (t.Length == prefix.Length) { argument = string.Empty; return true; }
+            if (!char.IsWhiteSpace(t[prefix.Length])) return false;
+            argument = t.Substring(prefix.Length).Trim();
+            return true;
+        }
+
+        private static bool TryParseSimpleArgument(string raw, string prefix, out string argument)
+        {
+            argument = null;
+            if (string.IsNullOrWhiteSpace(raw)) return false;
+            string t = raw.Trim();
             if (!t.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return false;
             if (t.Length == prefix.Length) { argument = string.Empty; return true; }
             if (!char.IsWhiteSpace(t[prefix.Length])) return false;

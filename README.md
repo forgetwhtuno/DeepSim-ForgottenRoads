@@ -1,10 +1,10 @@
-# Deep Sims for Erenshor 0.7.1 — native Lunaris development candidate
+# Deep Sims for Erenshor 0.7.3 — social-session overhaul development candidate
 
 Deep Sims makes Erenshor's existing SimPlayers feel more like persistent MMO companions. It observes verified game state, keeps bounded sidecar memory, and produces short social dialogue through deterministic templates or an optional local Ollama model.
 
 **Deep Sims does not replace Erenshor's Sim AI and does not control gameplay.** Erenshor remains authoritative for movement, combat, pulls, healing, targeting, loot, grouping, roles, equipment, quests, faction, progression, and saves.
 
-> This branch is being prepared as a native Lunaris build. Treat 0.7.1 as a development/migration candidate until the compile and in-game hot-reload checklist is completed on a current Erenshor installation.
+> This branch is being prepared as a native Lunaris build. Treat 0.7.3 as a development/migration candidate until the compile and in-game conversation checklist is completed on a current Erenshor installation.
 
 ## Requirements
 
@@ -134,6 +134,12 @@ OBSERVED_NOW
 ```
 
 Generated dialogue is evidence only that a line was said. It is never proof that its content happened. Unsupported phrases such as `again`, `last time`, or shared-history claims are rejected unless verified history supports them.
+
+### Live party grounding
+
+0.7.2 adds a separate typed `LivePartyFacts` boundary for current party membership. `GameData.GroupMembers` is the primary native authority; manual Deep Sim slots only filter which already-grouped local Sims may be enhanced and can never create membership. Every party-facing inference captures a membership version immediately before prompting, revalidates it after inference/before grounding, and checks it again at the final display boundary. A short empty-roster hold during zoning is represented as `transition_uncertain`, never as confirmed current membership. Remote COOP humans may appear as context when the existing COOP bridge proves them, but they are never eligible generated speakers.
+
+A deterministic final party-stance guard rejects or narrowly rewrites lines that conflict with live membership (for example an already-grouped Sim asking to be invited). See `DEEP_SIMS_PARTY_GROUNDING_IMPLEMENTATION.md` and `LIVE_TEST.md`.
 
 ## Main commands
 

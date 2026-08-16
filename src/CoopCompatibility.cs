@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Reflection;
 using UnityEngine;
 
@@ -193,6 +194,64 @@ namespace ErenshorDeepSims
             }
             catch { }
             return false;
+        }
+
+
+        internal sealed class VerifiedRemotePartyMember
+        {
+            internal short PlayerId;
+            internal string Name;
+        }
+
+        // Typed, read-only view of the same COOP authority used by
+        // IsVerifiedRemotePartyMemberName. A member is returned only when its non-Sim group entry
+        // can be matched to the connected Players dictionary. No presence/scene claim is inferred.
+        internal static List<VerifiedRemotePartyMember> GetVerifiedRemotePartyHumans()
+        {
+            List<VerifiedRemotePartyMember> result = new List<VerifiedRemotePartyMember>();
+            if (!IsCoopSessionActive()) return result;
+            try
+            {
+                object manager = GetConnectionManager(_clientConnectionManager);
+                IDictionary players = ReadPlayers(manager);
+                if (players == null || _clientGroup == null) return result;
+
+                Dictionary<short, string> connected = new Dictionary<short, string>();
+                foreach (DictionaryEntry entry in players)
+                {
+                    object player = entry.Value;
+                    if (player == null) continue;
+                    short id;
+                    try { id = Convert.ToInt16(entry.Key); } catch { continue; }
+                    FieldInfo nameField = player.GetType().GetField("entityName", BindingFlags.Public | BindingFlags.Instance);
+                    string name = nameField == null ? null : nameField.GetValue(player) as string;
+                    if (!string.IsNullOrWhiteSpace(name)) connected[id] = name.Trim();
+                }
+
+                FieldInfo currentGroupField = _clientGroup.GetField("currentGroup", BindingFlags.Public | BindingFlags.Static);
+                object group = currentGroupField == null ? null : currentGroupField.GetValue(null);
+                if (group == null) return result;
+                FieldInfo listField = group.GetType().GetField("groupList", BindingFlags.Public | BindingFlags.Instance);
+                IEnumerable members = listField == null ? null : listField.GetValue(group) as IEnumerable;
+                if (members == null) return result;
+                foreach (object member in members)
+                {
+                    if (member == null) continue;
+                    FieldInfo idField = member.GetType().GetField("entityID", BindingFlags.Public | BindingFlags.Instance);
+                    FieldInfo simField = member.GetType().GetField("isSim", BindingFlags.Public | BindingFlags.Instance);
+                    if (idField == null || simField == null) continue;
+                    short id;
+                    bool isSim;
+                    try { id = Convert.ToInt16(idField.GetValue(member)); isSim = Convert.ToBoolean(simField.GetValue(member)); }
+                    catch { continue; }
+                    if (isSim) continue;
+                    string name;
+                    if (!connected.TryGetValue(id, out name)) continue;
+                    result.Add(new VerifiedRemotePartyMember { PlayerId = id, Name = name });
+                }
+            }
+            catch { }
+            return result;
         }
 
         internal static bool IsVerifiedRemotePartyMemberName(string speaker)

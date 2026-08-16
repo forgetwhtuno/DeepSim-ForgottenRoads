@@ -112,6 +112,9 @@ namespace ErenshorDeepSims
     public class SimSnapshot
     {
         public string Key;
+        // Process-stable current-session identity derived from SimPlayerTracking when available.
+        // This is used only for live party authority/revalidation, never persisted as Sim memory.
+        public string PartyActorId;
         public string Name;
         public string ClassName;
         public string Scene;
@@ -180,6 +183,8 @@ namespace ErenshorDeepSims
         public string Scene;
         public PlayerSnapshot Player;
         public List<SimSnapshot> Party;
+        // Immutable authoritative party facts captured at this request boundary.
+        public LivePartyFacts LiveParty;
         public OutingSnapshot Outing;
         public CampContextFacts Camp;
     }

@@ -20,6 +20,7 @@ namespace ErenshorDeepSims
     internal static class CampmasterBridge
     {
         private const string ApiTypeName = "ErenshorCampmaster.CampmasterApi";
+        private const int SupportedSchemaVersion = 3;
 
         private static readonly object ResolveLock = new object();
         private static volatile bool _resolved;
@@ -118,17 +119,39 @@ namespace ErenshorDeepSims
                         Assembly assembly = assemblies[i];
                         if (assembly == null) continue;
                         Type type = assembly.GetType(ApiTypeName, false);
-                        if (type == null) continue;
+                        if (type == null || !SchemaIsSupported(type)) continue;
+
+                        const BindingFlags flags = BindingFlags.Public | BindingFlags.Static;
+                        PropertyInfo active = type.GetProperty("IsHuntCampActive", flags);
+                        MethodInfo snapshot = type.GetMethod("GetCurrentSnapshot", flags, null, Type.EmptyTypes, null);
+                        MethodInfo eventsAfter = type.GetMethod("GetEventsAfter", flags, null, new[] { typeof(long) }, null);
+                        if (active == null || active.PropertyType != typeof(bool) ||
+                            snapshot == null || snapshot.ReturnType != typeof(Dictionary<string, string>) ||
+                            eventsAfter == null || eventsAfter.ReturnType != typeof(List<Dictionary<string, string>>))
+                            continue;
+
                         _apiType = type;
-                        _isActiveProperty = type.GetProperty("IsHuntCampActive", BindingFlags.Public | BindingFlags.Static);
-                        _snapshotMethod = type.GetMethod("GetCurrentSnapshot", BindingFlags.Public | BindingFlags.Static, null, Type.EmptyTypes, null);
-                        _eventsMethod = type.GetMethod("GetEventsAfter", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(long) }, null);
+                        _isActiveProperty = active;
+                        _snapshotMethod = snapshot;
+                        _eventsMethod = eventsAfter;
                         break;
                     }
                 }
                 catch { }
                 _resolved = true;
             }
+        }
+
+        private static bool SchemaIsSupported(Type type)
+        {
+            if (type == null) return false;
+            try
+            {
+                FieldInfo schema = type.GetField("SchemaVersion", BindingFlags.Public | BindingFlags.Static);
+                return schema != null && schema.FieldType == typeof(int) &&
+                       (int)schema.GetValue(null) == SupportedSchemaVersion;
+            }
+            catch { return false; }
         }
 
         // -----------------------------------------------------------------

@@ -20,6 +20,8 @@ namespace ErenshorDeepSims
             result = PrintAndCheck(CharacterScopeDeterministicTests.Run(), result);
             result = PrintAndCheck(DeepSimsControlPolicyTests.Run(), result);
             result = PrintAndCheck(DiagnosticPrivacyTests.Run(), result);
+            result = PrintAndCheck(LivePartyGroundingTests.Run(), result);
+            result = PrintAndCheck(SocialOverhaulDeterministicTests.Run(), result);
             return result;
         }
 

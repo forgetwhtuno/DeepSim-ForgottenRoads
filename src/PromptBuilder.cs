@@ -37,6 +37,87 @@ namespace ErenshorDeepSims
             return messages;
         }
 
+        // Player-first prompt budget. The older general prompt remains available for whispers and
+        // autonomous/event expression, but direct party chat must fit comfortably inside numCtx=2048.
+        // Current live authority and the player's newest text are never trimmed to make room for
+        // lower-priority history.
+        internal static List<ChatMessage> BuildCompactDirectPartyReply(SimSnapshot sim, SimMemory memory,
+            WorldSnapshot world, IList<ConversationLine> thread, WikiResult knowledge,
+            SemanticTurnRoute route, string sessionSummary)
+        {
+            List<ChatMessage> messages = new List<ChatMessage>();
+            StringBuilder rules = new StringBuilder();
+            rules.AppendLine("You are " + Safe(sim == null ? null : sim.Name) + ", an Erenshor Sim and a member of this small party.");
+            rules.AppendLine("Reply as a persistent MMO friend, never as an assistant. Return one short visible party-chat line, normally under 18 words.");
+            rules.AppendLine("Respond specifically to the player's newest message. Questions need an answer, honest uncertainty, or useful clarification. Statements/opinions need acknowledgement plus a related reaction. Generic reusable prose is invalid.");
+            rules.AppendLine("Erenshor owns gameplay and facts. Never invent kills, loot, quests, inventory, routes, party membership, actions, or shared history. Harmless tastes/opinions are SoftPersona, not world facts.");
+            rules.AppendLine("Trust order: LIVE WORLD FACTS > VERIFIED HISTORY > SOFT PERSONA > HEARD DIALOGUE > generated prose.");
+            if (route != null) rules.AppendLine("TURN ROUTE: type=" + route.TurnType + " knowledge=" + route.KnowledgeNeed + " topic=" + Safe(route.Topic) + " subject=" + Safe(route.Subject) + " intent=" + Safe(route.SocialIntent) + ".");
+            messages.Add(new ChatMessage("system", rules.ToString().Trim()));
+
+            StringBuilder live = new StringBuilder();
+            live.AppendLine("CURRENT AUTHORITATIVE STATE:");
+            live.AppendLine("zone=" + Safe(world == null ? (sim == null ? null : sim.Scene) : world.Scene));
+            if (sim != null)
+            {
+                live.AppendLine("speaker=" + Safe(sim.Name) + " class=" + Safe(sim.ClassName) + " level=" + sim.Level + " guild=" + Safe(sim.GuildName));
+                if (sim.RoleAssignmentsKnown) live.AppendLine("exactManageRoles=" + (sim.AssignedRoles == null || sim.AssignedRoles.Count == 0 ? "none" : string.Join("/", sim.AssignedRoles.ToArray())));
+                live.AppendLine("personality=" + Safe(sim.Personality) + " voice=" + NativeDialogueStyle.DescribeVoiceContract(sim));
+            }
+            AppendAuthoritativeLivePartyFacts(live, world, sim);
+            if (world != null && world.Outing != null)
+            {
+                if (!string.IsNullOrWhiteSpace(world.Outing.CurrentEncounter)) live.AppendLine("rightNow=" + world.Outing.CurrentEncounter);
+                if (!string.IsNullOrWhiteSpace(world.Outing.LastEncounter)) live.AppendLine("lastCompleted=" + world.Outing.LastEncounter);
+            }
+            messages.Add(new ChatMessage("system", live.ToString().Trim()));
+
+            if (!string.IsNullOrWhiteSpace(sessionSummary))
+                messages.Add(new ChatMessage("system", "BOUNDED CURRENT-SESSION SUMMARY (provenance-preserving; do not embellish): " + BoundPromptText(sessionSummary, 900)));
+            if (memory != null)
+            {
+                string latest = thread == null || thread.Count == 0 || thread[thread.Count - 1] == null ? string.Empty : thread[thread.Count - 1].Text;
+                List<RelevantMemory> selected = MemoryRelevance.Select(memory, latest, 2);
+                if (selected.Count > 0)
+                {
+                    StringBuilder remembered = new StringBuilder("RELEVANT VERIFIED HISTORY ONLY:");
+                    for (int i = 0; i < selected.Count; i++) remembered.Append("\n- [").Append(selected[i].Source).Append("] ").Append(BoundPromptText(selected[i].Text, 260));
+                    messages.Add(new ChatMessage("system", remembered.ToString()));
+                }
+                List<SimPreferenceMemory> preferences = PreferenceMemoryPolicy.Select(memory.Preferences, latest, 1);
+                if (preferences.Count > 0) messages.Add(new ChatMessage("system", "SOFT PERSONA (opinion only, never a world fact): " + BoundPromptText(preferences[0].Statement, 180)));
+            }
+            if (knowledge != null)
+            {
+                string source = string.IsNullOrWhiteSpace(knowledge.SourceLabel) ? "retrieval" : knowledge.SourceLabel;
+                string evidence = knowledge.Found ? BoundPromptText(knowledge.Extract, 1500) : "No useful result was found.";
+                messages.Add(new ChatMessage("system", "RETRIEVED EVIDENCE [" + source + "] for the ORIGINAL player question. Paraphrase only supported facts; never claim personal experience: " + evidence));
+            }
+
+            if (thread != null)
+            {
+                int start = Math.Max(0, thread.Count - 4);
+                for (int i = start; i < thread.Count - 1; i++)
+                {
+                    ConversationLine line = thread[i];
+                    if (line != null && !string.IsNullOrWhiteSpace(line.Text))
+                        messages.Add(new ChatMessage("user", "VISIBLE PARTY CHAT " + Safe(line.Speaker) + ": " + BoundPromptText(line.Text, 260)));
+                }
+                if (thread.Count > 0)
+                {
+                    ConversationLine latest = thread[thread.Count - 1];
+                    if (latest != null) messages.Add(new ChatMessage("user", "PLAYER'S CURRENT MESSAGE â€” " + Safe(latest.Speaker) + ": " + BoundPromptText(latest.Text, 500) + "\nAnswer this exact message now. Return only the line."));
+                }
+            }
+            return messages;
+        }
+
+        private static string BoundPromptText(string value, int maxChars)
+        {
+            string clean = (value ?? string.Empty).Replace("\r", " ").Replace("\n", " ").Trim();
+            return clean.Length <= maxChars ? clean : clean.Substring(0, maxChars).TrimEnd();
+        }
+
         internal static List<ChatMessage> BuildPartyThreadReply(SimSnapshot sim, SimMemory memory, WorldSnapshot world, IList<ConversationLine> thread, int autonomousTurn, WikiResult wiki, string knowledgeSocialMode = null, string groundingFact = null, PartyReplyIntent replyIntent = PartyReplyIntent.FactualGameQuestion, SocialIntent socialIntent = null)
         {
             List<ChatMessage> messages = new List<ChatMessage>();
@@ -174,21 +255,9 @@ namespace ErenshorDeepSims
             facts.AppendLine("VERIFIED EVENT (" + candidate.Trust.ToString().ToUpperInvariant() + "):");
             facts.AppendLine(candidate.VerifiedContext);
             if (world != null && !string.IsNullOrWhiteSpace(world.Scene)) facts.AppendLine("Current zone: " + world.Scene + ".");
-            if (world != null && world.Party != null)
-            {
-                facts.Append("Current verified party: ");
-                bool wrote = false;
-                for (int i = 0; i < world.Party.Count; i++)
-                {
-                    SimSnapshot member = world.Party[i];
-                    if (member == null || string.IsNullOrWhiteSpace(member.Name)) continue;
-                    if (wrote) facts.Append(", ");
-                    facts.Append(member.Name);
-                    if (!string.IsNullOrWhiteSpace(member.ClassName)) facts.Append(" (").Append(member.ClassName).Append(")");
-                    wrote = true;
-                }
-                facts.AppendLine(".");
-            }
+            AppendAuthoritativeLivePartyFacts(facts, world, sim);
+            // Full current membership, including context-only remote humans, is emitted only by
+            // AppendAuthoritativeLivePartyFacts above. world.Party is the narrower generated-speaker set.
             messages.Add(new ChatMessage("system", facts.ToString()));
 
             if (thread != null && thread.Count > 0)
@@ -445,6 +514,7 @@ namespace ErenshorDeepSims
 
             sb.AppendLine("VERIFIED CURRENT FACTS:");
             sb.AppendLine("Current zone/scene: " + Safe(world == null ? sim.Scene : world.Scene));
+            AppendAuthoritativeLivePartyFacts(sb, world, sim);
             if (world != null && world.Player != null)
             {
                 string playerDesc = playerName;
@@ -720,6 +790,62 @@ namespace ErenshorDeepSims
             return text.Trim(' ', ',', ';', ':', '-');
         }
 
+        private static void AppendAuthoritativeLivePartyFacts(StringBuilder sb, WorldSnapshot world, SimSnapshot speaker)
+        {
+            if (sb == null) return;
+            LivePartyFacts facts = world == null ? null : world.LiveParty;
+            sb.AppendLine("LIVE PARTY FACTS — AUTHORITATIVE CURRENT STATE (newer than all memory and dialogue):");
+            if (facts == null)
+            {
+                sb.AppendLine("membershipState=unavailable");
+                sb.AppendLine("speakerPartyStatus=unknown");
+                sb.AppendLine("currentPartyMembers=unknown");
+                sb.AppendLine("RULE: do not claim anyone is grouped, not grouped, available, online, waiting for an invite, or about to join.");
+                return;
+            }
+
+            string membershipState = facts.MembershipState == LivePartyMembershipState.Confirmed ? "confirmed" :
+                (facts.MembershipState == LivePartyMembershipState.TransitionUncertain ? "transition_uncertain" : "unavailable");
+            sb.AppendLine("membershipState=" + membershipState);
+            sb.AppendLine("membershipVersion=" + facts.MembershipVersion);
+            sb.AppendLine("nativeAuthority=" + Safe(facts.NativeAuthoritySource));
+            sb.AppendLine("speakerName=" + Safe(speaker == null ? null : speaker.Name));
+
+            LivePartyActorFacts actor = speaker == null ? null : facts.FindByActorId(speaker.PartyActorId);
+            if (actor == null && speaker != null) actor = facts.FindCurrentByName(speaker.Name);
+            LivePartyStatus speakerStatus;
+            if (actor != null) speakerStatus = actor.PartyStatus;
+            else if (facts.MembershipState == LivePartyMembershipState.Confirmed) speakerStatus = LivePartyStatus.NotCurrentPartyMember;
+            else if (facts.MembershipState == LivePartyMembershipState.TransitionUncertain) speakerStatus = LivePartyStatus.TransitionUncertain;
+            else speakerStatus = LivePartyStatus.Unknown;
+            sb.AppendLine("speakerActorKind=" + (actor == null ? "unknown" : LivePartyFactsFormatting.ActorKind(actor.ActorKind)));
+            sb.AppendLine("speakerPartyStatus=" + LivePartyFactsFormatting.PartyStatus(speakerStatus));
+            sb.AppendLine("speakerPresent=" + (actor == null ? "unknown" : LivePartyFactsFormatting.Truth(actor.Present)));
+            sb.AppendLine("speakerOnline=" + (actor == null ? "unknown" : LivePartyFactsFormatting.Truth(actor.Online)));
+
+            if (facts.MembershipState != LivePartyMembershipState.Confirmed)
+            {
+                sb.AppendLine("currentPartyMembers=unknown_during_transition");
+                sb.AppendLine("RULE: retained roster context during zoning/loading is NOT proof of current membership. Avoid current party-status or availability claims.");
+                return;
+            }
+
+            List<string> members = new List<string>();
+            if (facts.LocalPlayer != null && facts.LocalPlayer.PartyStatus == LivePartyStatus.CurrentPartyMember)
+                members.Add(Safe(facts.LocalPlayer.Name) + "[" + LivePartyFactsFormatting.ActorKind(facts.LocalPlayer.ActorKind) + "]");
+            IList<LivePartyActorFacts> party = facts.Members;
+            for (int i = 0; i < party.Count; i++)
+            {
+                LivePartyActorFacts member = party[i];
+                if (member == null || member.PartyStatus != LivePartyStatus.CurrentPartyMember) continue;
+                members.Add(Safe(member.Name) + "[" + LivePartyFactsFormatting.ActorKind(member.ActorKind) + "]");
+            }
+            sb.AppendLine("currentPartyMembers=" + (members.Count == 0 ? "none" : string.Join(", ", members.ToArray())));
+            sb.AppendLine("RULE: LIVE PARTY FACTS override every historical group_join/group_leave memory and every heard/generated line.");
+            if (speakerStatus == LivePartyStatus.CurrentPartyMember)
+                sb.AppendLine("RULE: the speaker is ALREADY IN THE CURRENT PARTY. Never ask for an invite, offer/promise to join, advertise external availability, or offer to come along as though absent.");
+        }
+
         private static string Safe(string value) { return string.IsNullOrWhiteSpace(value) ? "unknown" : value; }
 
         // Known current Erenshor class names (mirrors SimContextReader.DescribeClassRole's list, plus
@@ -927,7 +1053,9 @@ namespace ErenshorDeepSims
                     MemoryEvent evt = memory.RecentEvents[i];
                     if (evt == null || string.IsNullOrWhiteSpace(evt.text)) continue;
                     if (string.Equals(evt.type, "deep_group_chat", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(evt.type, "conversation", StringComparison.OrdinalIgnoreCase)) continue;
+                        string.Equals(evt.type, "conversation", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(evt.type, "group_join", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(evt.type, "group_leave", StringComparison.OrdinalIgnoreCase)) continue;
                     Add(candidates, "event", evt.text, 2.0 + Math.Min(4.0, evt.importance / 25.0), recency, query);
                 }
             }

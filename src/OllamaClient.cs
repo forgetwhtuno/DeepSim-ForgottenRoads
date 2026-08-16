@@ -117,7 +117,7 @@ namespace ErenshorDeepSims
             // List<T> proved too opaque: an omitted/empty messages array makes Ollama treat
             // the call like a model-load request and return done_reason=load.
             string requestJson = BuildChatRequestJson(body);
-            if (_log != null) _log.LogDebug("Ollama chat request: utc=" + DateTime.UtcNow.ToString("HH:mm:ss.fff") +
+            if (_log != null && DeepSimsDiagnostics.Verbose) _log.LogDebug("Ollama chat request: utc=" + DateTime.UtcNow.ToString("HH:mm:ss.fff") +
                 " model=" + Safe(model) + " messages=" + (messages == null ? 0 : messages.Count) +
                 " " + DiagnosticPrivacy.DescribeChars("request", requestJson) + " numCtx=" + options.num_ctx + " numPredict=" + options.num_predict);
             string responseJson = PostJson(endpoint, requestJson, timeoutSeconds);
@@ -144,7 +144,7 @@ namespace ErenshorDeepSims
                 result.Thinking = ExtractJsonString(responseJson, "thinking", messageStart);
             }
 
-            if (_log != null && !string.IsNullOrWhiteSpace(result.Content))
+            if (_log != null && DeepSimsDiagnostics.Verbose && !string.IsNullOrWhiteSpace(result.Content))
                 _log.LogDebug("Ollama reply parsed successfully: utc=" + DateTime.UtcNow.ToString("HH:mm:ss.fff") +
                     " chars=" + result.Content.Length + " eval_count=" + result.EvalCount +
                     " prompt_eval_count=" + result.PromptEvalCount);

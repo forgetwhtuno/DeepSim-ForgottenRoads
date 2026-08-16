@@ -1,10 +1,11 @@
-# Kept as independent checkouts beside Deep Sims for local combined development.
+# Old embedded/local companion checkouts are not source. The suite uses sibling repos under the workspace mods directory.
 /ErenshorFollow/
 /ErenshorDuel/
 /Erenshor-Party-Tools/
 /ErenShorCampRelax/
 /Erenshor-Nemesis/
 /Erenshor-PvP/
+/Erenshor-Crafting-Expanded/
 
 # Editor/tool working backups, not source.
 /.codex-backups/
@@ -17,3 +18,6 @@
 /LunarisLibs/
 /LunarisLibs.zip
 /erenshor-lunaris-release-prep.zip
+
+# Local candidate build output; source is the publication unit.
+/build-output/

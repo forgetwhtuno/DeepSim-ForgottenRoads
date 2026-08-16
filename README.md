@@ -8,6 +8,13 @@ Deep Sims makes Erenshor's existing SimPlayers feel more like persistent MMO com
 
 Part of the **Forgotten Roads for Erenshor** mod collection.
 
+## What's new in 0.7.4
+
+- Explicit opinion and preference questions stay with the Sim instead of triggering factual Wiki/news retrieval.
+- Direct replies that fail grounding use a bounded grounded/template fallback; rejected generated claims remain hidden.
+- `/dsbanter` now creates a bounded connected A+B conversation thread through the existing Social Director.
+- Autonomous semantic seeds temporarily remember verifier rejection, reducing repeated unsupported prompts without turning rejected text into world knowledge.
+
 ## Requirements
 
 - Erenshor
@@ -151,6 +158,7 @@ A deterministic final party-stance guard rejects or narrowly rewrites lines that
 /aimodel <model>          change Ollama model
 /dwhisper <Sim> <text>    force an AI whisper
 /vwhisper <Sim> <text>    request vanilla-style handling
+/dsbanter                 start a bounded connected A+B banter thread
 /dssession                encounter/session state
 /dsperf                   performance/request diagnostics
 /dsmemory [Sim]           bounded memory inspection

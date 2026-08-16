@@ -6,6 +6,8 @@ Deep Sims makes Erenshor's existing SimPlayers feel more like persistent MMO com
 
 > This branch is being prepared as a native Lunaris build. Treat 0.7.3 as a development/migration candidate until the compile and in-game conversation checklist is completed on a current Erenshor installation.
 
+Part of the **Forgotten Roads for Erenshor** mod collection.
+
 ## Requirements
 
 - Erenshor

@@ -46,12 +46,19 @@ namespace ErenshorDeepSims
 
         internal Task<string> ChatAsync(string endpoint, string model, List<ChatMessage> messages, int timeoutSeconds, int numCtx, string keepAlive, string inferenceMode, int cpuThreads)
         {
+            return ChatAsync(endpoint, model, messages, timeoutSeconds, numCtx, keepAlive, inferenceMode, cpuThreads, null);
+        }
+
+        // `capture` is diagnostic-only and is null in every normal call path. It never influences the
+        // request, the retry ladder, or the returned content; it only observes each real HTTP attempt.
+        internal Task<string> ChatAsync(string endpoint, string model, List<ChatMessage> messages, int timeoutSeconds, int numCtx, string keepAlive, string inferenceMode, int cpuThreads, PromptCapturePacket capture)
+        {
             return Task.Run(delegate
             {
                 OllamaTimingMetrics aggregate = new OllamaTimingMetrics();
                 // Short MMO replies do not need a large generation budget. Thinking is
                 // explicitly disabled in the request for models that support it.
-                ChatAttempt first = SendChat(endpoint, model, messages, timeoutSeconds, numCtx, keepAlive, 72, inferenceMode, cpuThreads);
+                ChatAttempt first = SendChat(endpoint, model, messages, timeoutSeconds, numCtx, keepAlive, 72, inferenceMode, cpuThreads, capture, PromptCaptureAttemptKind.Primary);
                 AccumulateTiming(aggregate, first);
                 if (!string.IsNullOrWhiteSpace(first.Content)) { SetLastTiming(aggregate); return first.Content; }
 
@@ -63,7 +70,7 @@ namespace ErenshorDeepSims
                 if (string.Equals(first.DoneReason, "load", StringComparison.OrdinalIgnoreCase))
                 {
                     System.Threading.Thread.Sleep(900);
-                    ChatAttempt afterLoad = SendChat(endpoint, model, messages, timeoutSeconds, numCtx, keepAlive, 96, inferenceMode, cpuThreads);
+                    ChatAttempt afterLoad = SendChat(endpoint, model, messages, timeoutSeconds, numCtx, keepAlive, 96, inferenceMode, cpuThreads, capture, PromptCaptureAttemptKind.PostLoadRetry);
                     AccumulateTiming(aggregate, afterLoad);
                     if (!string.IsNullOrWhiteSpace(afterLoad.Content)) { SetLastTiming(aggregate); return afterLoad.Content; }
                     LogEmptyResponse("post-load retry", afterLoad);
@@ -71,7 +78,7 @@ namespace ErenshorDeepSims
                 }
 
                 // Retry with a little more room in case a model ended before final content.
-                ChatAttempt second = SendChat(endpoint, model, messages, timeoutSeconds, numCtx, keepAlive, 112, inferenceMode, cpuThreads);
+                ChatAttempt second = SendChat(endpoint, model, messages, timeoutSeconds, numCtx, keepAlive, 112, inferenceMode, cpuThreads, capture, PromptCaptureAttemptKind.ExpandedBudget);
                 AccumulateTiming(aggregate, second);
                 if (!string.IsNullOrWhiteSpace(second.Content)) { SetLastTiming(aggregate); return second.Content; }
 
@@ -82,7 +89,7 @@ namespace ErenshorDeepSims
                 // Erenshor authoritative for actual gameplay actions.
                 List<ChatMessage> flattened = new List<ChatMessage>();
                 flattened.Add(new ChatMessage("user", FlattenMessages(messages)));
-                ChatAttempt third = SendChat(endpoint, model, flattened, timeoutSeconds, numCtx, keepAlive, 96, inferenceMode, cpuThreads);
+                ChatAttempt third = SendChat(endpoint, model, flattened, timeoutSeconds, numCtx, keepAlive, 96, inferenceMode, cpuThreads, capture, PromptCaptureAttemptKind.FlattenedFallback);
                 AccumulateTiming(aggregate, third);
                 if (!string.IsNullOrWhiteSpace(third.Content)) { SetLastTiming(aggregate); return third.Content; }
 
@@ -93,6 +100,11 @@ namespace ErenshorDeepSims
         }
 
         private ChatAttempt SendChat(string endpoint, string model, List<ChatMessage> messages, int timeoutSeconds, int numCtx, string keepAlive, int numPredict, string inferenceMode, int cpuThreads)
+        {
+            return SendChat(endpoint, model, messages, timeoutSeconds, numCtx, keepAlive, numPredict, inferenceMode, cpuThreads, null, PromptCaptureAttemptKind.Primary);
+        }
+
+        private ChatAttempt SendChat(string endpoint, string model, List<ChatMessage> messages, int timeoutSeconds, int numCtx, string keepAlive, int numPredict, string inferenceMode, int cpuThreads, PromptCapturePacket capture, PromptCaptureAttemptKind attemptKind)
         {
             OllamaOptions options = new OllamaOptions();
             options.num_ctx = numCtx;
@@ -120,7 +132,22 @@ namespace ErenshorDeepSims
             if (_log != null && DeepSimsDiagnostics.Verbose) _log.LogDebug("Ollama chat request: utc=" + DateTime.UtcNow.ToString("HH:mm:ss.fff") +
                 " model=" + Safe(model) + " messages=" + (messages == null ? 0 : messages.Count) +
                 " " + DiagnosticPrivacy.DescribeChars("request", requestJson) + " numCtx=" + options.num_ctx + " numPredict=" + options.num_predict);
-            string responseJson = PostJson(endpoint, requestJson, timeoutSeconds);
+
+            // Diagnostic capture of the EXACT body about to be submitted. This is the last point at
+            // which the request is still identical to what the HTTP layer will send.
+            PromptCaptureAttempt captured = RecordAttemptRequest(capture, attemptKind, endpoint, model, messages,
+                body, options, inferenceMode, requestJson);
+
+            string responseJson;
+            try
+            {
+                responseJson = PostJson(endpoint, requestJson, timeoutSeconds);
+            }
+            catch (Exception httpFailure)
+            {
+                RecordAttemptFailure(captured, httpFailure);
+                throw;
+            }
 
             // Do not use Unity JsonUtility for Ollama's response envelope. In Unity 2021
             // it successfully populated primitive top-level fields but left the nested
@@ -149,7 +176,77 @@ namespace ErenshorDeepSims
                     " chars=" + result.Content.Length + " eval_count=" + result.EvalCount +
                     " prompt_eval_count=" + result.PromptEvalCount);
 
+            RecordAttemptResponse(captured, result);
             return result;
+        }
+
+        // ---- diagnostic capture helpers -------------------------------------------------------
+        // All three are best-effort and swallow their own exceptions: a diagnostic failure must never
+        // turn into an inference failure.
+
+        private static PromptCaptureAttempt RecordAttemptRequest(PromptCapturePacket capture, PromptCaptureAttemptKind kind,
+            string endpoint, string model, List<ChatMessage> messages, OllamaChatRequest body, OllamaOptions options,
+            string inferenceMode, string requestJson)
+        {
+            if (capture == null) return null;
+            try
+            {
+                PromptCaptureAttempt attempt = capture.BeginAttempt(kind);
+                attempt.EndpointKind = PromptCaptureRedaction.EndpointKind(endpoint);
+                attempt.Model = model ?? string.Empty;
+                attempt.InferenceMode = inferenceMode ?? string.Empty;
+                attempt.Stream = body.stream;
+                attempt.Think = body.think;
+                attempt.KeepAlive = body.keep_alive ?? string.Empty;
+                attempt.NumCtx = options.num_ctx;
+                attempt.Temperature = options.temperature;
+                attempt.NumPredict = options.num_predict;
+                attempt.NumGpu = options.num_gpu;
+                attempt.NumThread = options.num_thread;
+                attempt.SerializedRequestJson = requestJson ?? string.Empty;
+                if (messages != null)
+                {
+                    for (int i = 0; i < messages.Count; i++)
+                    {
+                        ChatMessage message = messages[i];
+                        if (message == null) continue;
+                        attempt.Messages.Add(new PromptCaptureMessage(message.role, message.content));
+                    }
+                }
+                return attempt;
+            }
+            catch { return null; }
+        }
+
+        private static void RecordAttemptResponse(PromptCaptureAttempt attempt, ChatAttempt result)
+        {
+            if (attempt == null || result == null) return;
+            try
+            {
+                attempt.HttpSucceeded = true;
+                attempt.Done = result.Done;
+                attempt.DoneReason = result.DoneReason ?? string.Empty;
+                attempt.Content = result.Content ?? string.Empty;
+                attempt.Thinking = result.Thinking ?? string.Empty;
+                attempt.PromptEvalCount = result.PromptEvalCount;
+                attempt.EvalCount = result.EvalCount;
+                attempt.TotalMs = result.TotalDurationNs / 1000000.0;
+                attempt.LoadMs = result.LoadDurationNs / 1000000.0;
+                attempt.PromptEvalMs = result.PromptEvalDurationNs / 1000000.0;
+                attempt.EvalMs = result.EvalDurationNs / 1000000.0;
+            }
+            catch { }
+        }
+
+        private static void RecordAttemptFailure(PromptCaptureAttempt attempt, Exception ex)
+        {
+            if (attempt == null) return;
+            try
+            {
+                attempt.HttpSucceeded = false;
+                attempt.HttpErrorType = DiagnosticPrivacy.ExceptionType(ex);
+            }
+            catch { }
         }
 
         private void LogEmptyResponse(string phase, ChatAttempt attempt)

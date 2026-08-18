@@ -146,7 +146,7 @@ Name-only fallback can still collide if two save slots use the same character na
 
 `OnDestroy()` now additionally clears Deep Sims-owned static runtime state:
 
-- legacy embedded `/dsfollow` target/state;
+- no embedded `/dsfollow` movement state; Erenshor Follow owns movement compatibility;
 - Duel social dedup/counters;
 - PvP social dedup window;
 - Nemesis social dedup window.

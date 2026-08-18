@@ -17,7 +17,7 @@ This is a local-integration handoff. No Git write was performed by the audit.
 
 Erenshor owns gameplay truth and gameplay decisions. Deep Sims may observe, remember bounded verified/social context, and express social flavor. The LLM never gets authority to move Sims, attack, heal, loot, equip, quest, choose pulls/targets, toggle combat automation, change faction, or write native save truth.
 
-The embedded legacy `/dsfollow` path moves only the local human player toward a selected local Sim and is automatically disabled when standalone Erenshor Follow is detected. This audit did not expand it.
+The embedded legacy `/dsfollow` movement path has been removed. Deep Sims no longer owns player movement; `/dsfollow` compatibility belongs to the standalone Erenshor Follow plugin.
 
 ## Main changes made by this audit
 

@@ -327,12 +327,23 @@ namespace ErenshorDeepSims
         // this only ever supplies a probability, never a guarantee, and returns 0 with no hook at all.
         internal static double ContinuationChance(int replyIndex, bool hasHook, SocialActivityPreset preset)
         {
-            if (!hasHook) return 0.0;
-            bool lively = preset == SocialActivityPreset.Lively;
-            double livelyBoost = lively ? 0.12 : 0.0;
-            if (replyIndex <= 2) return Math.Min(1.0, 0.55 + livelyBoost);
-            if (replyIndex == 3) return Math.Min(1.0, 0.30 + livelyBoost);
-            return Math.Min(1.0, (lively ? 0.20 : 0.10) + livelyBoost);
+            return ContinuationChance(replyIndex, hasHook ? SimReplyUrge.Normal : SimReplyUrge.None, preset);
+        }
+
+        // Graded form. A boolean hook could not distinguish "Kestrel, did you see that?" from "the
+        // rain let up", so an answered thread died at one line far too often. The urge tiers come from
+        // SimResponseDecision; the decay across replyIndex is unchanged in shape - only the starting
+        // height now depends on how strongly the previous line actually invited an answer.
+        internal static double ContinuationChance(int replyIndex, SimReplyUrge urge, SocialActivityPreset preset)
+        {
+            if (urge == SimReplyUrge.None) return 0.0;
+            double presetDelta = preset == SocialActivityPreset.Lively ? 0.12
+                : preset == SocialActivityPreset.Quiet ? -0.15 : 0.0;
+            double baseChance;
+            if (urge == SimReplyUrge.Strong) baseChance = replyIndex <= 2 ? 0.95 : replyIndex == 3 ? 0.72 : 0.45;
+            else if (urge == SimReplyUrge.Normal) baseChance = replyIndex <= 2 ? 0.80 : replyIndex == 3 ? 0.50 : 0.25;
+            else baseChance = replyIndex <= 2 ? 0.45 : replyIndex == 3 ? 0.22 : 0.10;
+            return Math.Max(0.02, Math.Min(1.0, baseChance + presetDelta));
         }
     }
 }

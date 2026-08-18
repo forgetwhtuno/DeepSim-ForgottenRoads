@@ -67,8 +67,8 @@ namespace ErenshorDeepSims
         [Config("Endpoint", "Ollama", "Ollama /api/chat endpoint.")]
         public string Endpoint = "http://localhost:11434/api/chat";
 
-        [Config("Model", "Ollama", "One shared local model used by all Deep Sims. Recommended: qwen3.5:2b.")]
-        public string Model = "qwen3.5:2b";
+        [Config("Model", "Ollama", "The ONE local Ollama model used for every Deep Sims request (classification, replies, retries, and fallbacks). Recommended: qwen3.5:4b.")]
+        public string Model = "qwen3.5:4b";
 
         [Config("TimeoutSeconds", "Ollama", "Maximum wait for one local model reply.")]
         public int TimeoutSeconds = 45;
@@ -193,7 +193,7 @@ namespace ErenshorDeepSims
         [Config("ThreadReadDelaySeconds", "Social Director", "Brief delay after a Deep Sim reply becomes visible before deciding on the next line in the same thread. Lets the player, a vanilla Sim, or combat change the conversation before the next line is generated.")]
         public float ThreadReadDelaySeconds = 0.9f;
 
-        [Config("MaxAutonomousThreadReplies", "Social Director", "Maximum AI messages in one autonomous party-chat thread before Deep Sims waits for the player. Hard-capped at 6. This is an upper bound, not a target: threads should stop earlier whenever there is no natural hook to continue.")]
+        [Config("MaxAutonomousThreadReplies", "Social Director", "Maximum Sim responses to a single party-chat line before Deep Sims waits for the player. Hard-capped at 3. This is an upper bound, not a target: threads stop earlier whenever the previous line does not invite an answer.")]
         public int MaxAutonomousThreadReplies = 4;
 
         [Config("PauseAutonomousAIInCombat", "Performance", "Do not start idle/event/banter LLM generations during active or very recent combat. Player-initiated /p and /dw replies still work.")]
@@ -202,10 +202,10 @@ namespace ErenshorDeepSims
         [Config("InferenceMode", "Performance", "Ollama runner mode: Auto lets Ollama choose, CPU forces num_gpu=0, GPU requests maximum GPU offload (num_gpu=-1). Changing this may reload the model.")]
         public string InferenceMode = "Auto";
 
-        [Config("ReasoningMode", "Performance", "Higher-capability model routing: Off always uses Model, Selective uses ReasoningModel only for factual/history/grounding-correction requests, and Always uses ReasoningModel for every LLM line.")]
+        [Config("ReasoningMode", "Performance", "Diagnostic/routing signal only: Off never flags a turn as reasoning-shaped, Selective flags factual/history/grounding-correction requests, Always flags every LLM line. Deep Sims requests the SAME single Model for every call regardless of this setting; it no longer selects a different model.")]
         public string ReasoningMode = "Selective";
 
-        [Config("ReasoningModel", "Performance", "Optional larger Ollama model for reasoning-heavy requests. If it is blank, matches Model, or fails, Deep Sims uses the primary Model. Native think=true remains disabled because supported Qwen 3.5 builds may exhaust the reply budget without producing final text.")]
+        [Config("ReasoningModel", "Performance (legacy)", "DEPRECATED. Deep Sims now requests only the single Model above for every call; a separate reasoning model is never selected at runtime, so keep_alive can no longer keep two models resident. This field is read once at startup only to migrate an existing installation's previously chosen strong model into Model, then has no further effect.")]
         public string ReasoningModel = "qwen3.5:4b";
 
         [Config("CpuThreads", "Performance", "CPU inference thread count sent to Ollama. 0 lets Ollama choose. Mainly useful with InferenceMode=CPU.")]
@@ -258,5 +258,23 @@ namespace ErenshorDeepSims
 
         [Config("VerboseLogging", "Diagnostics", "Enable high-volume Deep Sims social-routing diagnostics. Warnings, errors, grounding rejections, and explicit diagnostic commands remain visible regardless.")]
         public bool VerboseLogging = false;
+
+        // ---- Local prompt-capture diagnostics (developer only, OFF by default) --------------------
+        // When enabled, Deep Sims writes the exact LLM request/result packets for each inference to a
+        // local diagnostics directory so prompt designs can be compared offline. Packets contain the
+        // real conversation and prompt text by design and never leave this machine; normal logs keep
+        // only privacy-safe counters. Leave this off for ordinary play.
+        [Config("PromptCaptureEnabled", "Diagnostics", "DEVELOPER ONLY. Write exact local LLM request/result packets for offline prompt analysis. Packets contain real conversation text and stay on this machine. Off by default.")]
+        // Shipped default is OFF. Toggle this in the runtime config (or via the in-game settings) for
+        // an explicit local capture session - do not flip the compiled default for that; it must stay
+        // false in source so an ordinary build/install never captures dialogue without the operator
+        // deliberately turning it on.
+        public bool PromptCaptureEnabled = false;
+
+        [Config("PromptCaptureMaxFiles", "Diagnostics", "Maximum logical LLM requests captured per session. When reached, capture stops and warns once rather than deleting collected evidence.")]
+        public int PromptCaptureMaxFiles = 100;
+
+        [Config("PromptCaptureIncludeClassifier", "Diagnostics", "Also capture the semantic classifier call as its own linked packet, including the raw classification and the deterministic corrections applied to it.")]
+        public bool PromptCaptureIncludeClassifier = true;
     }
 }

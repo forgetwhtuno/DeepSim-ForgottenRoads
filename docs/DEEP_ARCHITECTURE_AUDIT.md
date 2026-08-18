@@ -255,7 +255,7 @@ Reflection/capability-based, read/social only. `AssemblyLoad` handler is explici
 
 ### Follow
 
-Standalone Follow is detected and owns normal follow/lead movement when present. The legacy Deep Sims `/dsfollow` path affects only the local human player and is stopped during Deep Sims unload. Deep Sims does not use it to move Sims.
+Erenshor Follow owns follow/lead movement. Deep Sims no longer carries an embedded `/dsfollow` movement path and does not patch player movement.
 
 ### Duel
 

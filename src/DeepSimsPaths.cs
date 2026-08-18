@@ -19,6 +19,12 @@ namespace ErenshorDeepSims
             return Path.Combine(CharacterMemoryRoot, key);
         }
         internal static string ExportDirectory { get { return Path.Combine(DataRoot, "Exports"); } }
+
+        // Local-only developer diagnostics. Never packaged, never published, never committed:
+        // see .gitignore and the suite release whitelist. Created lazily only when prompt capture is
+        // explicitly enabled, so ordinary installs never grow this directory.
+        internal static string DiagnosticsRoot { get { return Path.Combine(DataRoot, "Diagnostics"); } }
+        internal static string PromptCaptureRoot { get { return Path.Combine(DiagnosticsRoot, "PromptCapture"); } }
         internal static string DiagnosticFile(string name) { return Path.Combine(DataRoot, name); }
 
         internal static bool HasLegacyGlobalMemory()

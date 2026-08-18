@@ -123,6 +123,12 @@ namespace ErenshorDeepSims
                 return false;
             }
 
+            if (HasUnsupportedCausalGuess(reply, verified))
+            {
+                reason = "unsupported causal explanation for an unexplained event";
+                return false;
+            }
+
             if (world != null && world.Outing != null && !string.IsNullOrWhiteSpace(world.Outing.Activity) &&
                 world.Outing.Activity.IndexOf("combat", StringComparison.OrdinalIgnoreCase) >= 0)
             {
@@ -323,6 +329,14 @@ namespace ErenshorDeepSims
             AddSelfTestResult(results, "harmless boss opinion", "bosses are rough", true, memory, world);
             AddSelfTestResult(results, "harmless healing opinion", "healing feels good", true, memory, world);
             AddSelfTestResult(results, "harmless gear opinion", "swords look great", true, memory, world);
+            AddSelfTestResult(results, "unsupported current food claim", "I'm eating a hot stew right now.", false, memory, world);
+            AddSelfTestResult(results, "unsupported munching claim", "I'm just munching on some snacks.", false, memory, world);
+            AddSelfTestResult(results, "hypothetical food preference is allowed", "I'd go for something warm.", true, memory, world);
+            AddSelfTestResult(results, "unsupported individual mana claim", "My mana is low right now.", false, memory, world);
+            AddSelfTestResult(results, "hedged mana guess is allowed", "I'd rather save my mana for later.", true, memory, world);
+            AddSelfTestResult(results, "unsupported causal guess for vanished party", "They probably respawned somewhere else.", false, memory, world);
+            AddSelfTestResult(results, "unsupported causal guess for disconnect", "Another squad must have aggroed them.", false, memory, world);
+            AddSelfTestResult(results, "plain reaction to unexplained event is allowed", "Yeah, that was weird.", true, memory, world);
 
             SimMemory established = new SimMemory();
             established.Normalize();
@@ -647,7 +661,38 @@ namespace ErenshorDeepSims
                     if (!HasAssertionEvidence(clause, verified, memory, world, actionSupport, false))
                         return FailAssertion("spell/heal/action", out reason);
                 }
+
+                // Real-packet prompt labs (local-labs/4b-prompt-lab-v3..v5) repeatedly found the model
+                // will state a current meal or an individual resource level as present-tense fact when
+                // asked ("I'm eating stew", "my mana is low") even though neither was ever supplied as
+                // evidence. A hypothetical/preference framing ("I'd go for something warm", "I'd rather
+                // save my mana") is explicitly NOT flagged - only a present-tense claim of what is
+                // actually happening right now requires support.
+                if (IsCurrentFoodAssertion(clause) &&
+                    !HasAssertionEvidence(clause, verified, memory, world, @"\b(?:eat(?:ing|s)?|meal|food|snack)\b", false))
+                    return FailAssertion("current food/meal", out reason);
+
+                if (IsIndividualResourceAssertion(clause) &&
+                    !HasAssertionEvidence(clause, verified, memory, world, @"\b(?:mana|mp|hp|health|stamina)\b", false))
+                    return FailAssertion("current resource/mana state", out reason);
             }
+            return true;
+        }
+
+        // Present-tense first-person "I am currently eating/having X" - not a preference or hypothetical
+        // ("I'd go for...", "I like...", "I'd rather have..."), an assertion about what is happening now.
+        private static bool IsCurrentFoodAssertion(string clause)
+        {
+            if (!Regex.IsMatch(clause, @"\b(?:i'?m|i\s+am|we'?re|we\s+are)\s+(?:just\s+)?(?:currently\s+)?(?:eating|munching(?:\s+on)?|having|snacking(?:\s+on)?)\b", RegexOptions.IgnoreCase)) return false;
+            return true;
+        }
+
+        // A present-tense first-person claim about current mana/health/stamina level. Hedged guesses
+        // ("I'd rather save my mana", "I might be low on mana") are hypotheticals, not a state report.
+        private static bool IsIndividualResourceAssertion(string clause)
+        {
+            if (!Regex.IsMatch(clause, @"\bmy\s+(?:mana|mp|hp|health|stamina)\s+(?:is|are)\b|\b(?:i'?m|i\s+am)\s+(?:out\s+of|low\s+on|full\s+on)\s+(?:mana|mp|hp|health|stamina)\b", RegexOptions.IgnoreCase)) return false;
+            if (Regex.IsMatch(clause, @"\b(?:i'd|i\s+would|might|probably|maybe|i\s+think|i\s+guess)\b", RegexOptions.IgnoreCase)) return false;
             return true;
         }
 
@@ -1181,6 +1226,23 @@ namespace ErenshorDeepSims
             return false;
         }
 
+        // Plausibility is not verification. The real-packet labs found the model readily offers a
+        // specific, confident-sounding cause for something it never actually observed - "they probably
+        // respawned", "another squad must have aggroed them", "they disconnected" - for an unexplained
+        // event like a party vanishing. A plain reaction ("yeah, that was weird") remains fully allowed;
+        // only a stated CAUSE is gated, and only when the verified corpus does not already establish it.
+        private static bool HasUnsupportedCausalGuess(string reply, string verified)
+        {
+            if (string.IsNullOrWhiteSpace(reply)) return false;
+            Match causal = Regex.Match(reply,
+                @"\b(?:probably|must\s+(?:have|'ve)|maybe\s+(?:they|it)|i\s+bet(?:\s+they)?)\s+(?:respawned|disconnected|d\/?c'?d|logged\s+off|aggro(?:ed)?|got\s+(?:aggro|pulled|wiped|disconnected)|rage\s*quit|crashed|lagged\s+out)\b|" +
+                @"\bthey\s+(?:must\s+have|probably)\s+[a-z]+ed\b|" +
+                @"\b(?:another\s+(?:squad|group|party)\s+(?:must\s+have|probably)\s+aggroed\s+them)\b",
+                RegexOptions.IgnoreCase);
+            if (!causal.Success) return false;
+            return string.IsNullOrWhiteSpace(verified) || verified.IndexOf(causal.Value, StringComparison.OrdinalIgnoreCase) < 0;
+        }
+
         private static bool HasUnsupportedRelationshipClaim(string reply, SimMemory memory, out string reason)
         {
             reason = string.Empty;
@@ -1477,6 +1539,49 @@ namespace ErenshorDeepSims
                     return true;
                 }
             }
+            return false;
+        }
+
+        // Deterministic replacement for the old "send an already-accepted, already-grounded reply back
+        // through the model to make it shorter/prettier" pass. That LLM rewrite could - and once did in
+        // practice - drift the subject of an otherwise valid, grounded line while satisfying the length/
+        // voice checks (they check length and voice, not fidelity to the original claim). An overlong
+        // reply is instead trimmed to the largest whole-sentence prefix that fits the budget; if even the
+        // first sentence alone does not fit, or the reply is not overlong for a purely length reason
+        // (incomplete/voice-invalid), no safe deterministic edit exists and the caller must fall back to
+        // NO_MESSAGE rather than spend a second LLM call.
+        internal static bool TryDeterministicallyShorten(string reply, int maxWords, int maxCharacters, out string shortened)
+        {
+            shortened = string.Empty;
+            if (string.IsNullOrWhiteSpace(reply)) return false;
+            string text = reply.Trim();
+
+            MatchCollection sentenceEnds = Regex.Matches(text, @"[.!?]+(?:\s|$)");
+            string best = string.Empty;
+            int cursor = 0;
+            for (int i = 0; i < sentenceEnds.Count; i++)
+            {
+                int end = sentenceEnds[i].Index + sentenceEnds[i].Length;
+                string candidate = text.Substring(0, end).Trim();
+                if (candidate.Length == 0) continue;
+                string reasonUnused;
+                if (IsOverlong(candidate, maxWords, maxCharacters, out reasonUnused))
+                {
+                    if (best.Length == 0) { cursor = end; break; }
+                    break;
+                }
+                best = candidate;
+                cursor = end;
+            }
+            if (best.Length > 0)
+            {
+                shortened = best;
+                return true;
+            }
+
+            // No complete sentence fits the budget at all (or the reply has no sentence punctuation).
+            // Do not guess at a mid-clause cut - that is exactly the kind of edit that can change what a
+            // reply claims. There is nothing safe left to trim deterministically.
             return false;
         }
 

@@ -32,7 +32,28 @@ namespace ErenshorDeepSims
             return result;
         }
 
+        // Diagnostic-only record of what the classifier model actually returned BEFORE the
+        // deterministic corrections below rewrite it in place. Production callers use the
+        // three-argument overload and are completely unaffected.
+        internal sealed class SemanticRouteTrace
+        {
+            internal bool HasRawClassifier;
+            internal SemanticTurnType RawTurnType;
+            internal KnowledgeNeed RawKnowledgeNeed;
+            internal string RawTopic = string.Empty;
+            internal string RawSubject = string.Empty;
+            internal string RawSearchQuery = string.Empty;
+            internal double RawConfidence;
+            internal bool RawDirectAnswerRequired;
+            internal readonly List<string> Corrections = new List<string>();
+        }
+
         internal static bool TryParse(string raw, string original, out SemanticTurnRoute route)
+        {
+            return TryParse(raw, original, out route, null);
+        }
+
+        internal static bool TryParse(string raw, string original, out SemanticTurnRoute route, SemanticRouteTrace trace)
         {
             route = null;
             if (string.IsNullOrWhiteSpace(raw)) return false;
@@ -63,11 +84,36 @@ namespace ErenshorDeepSims
             parsed.DirectAnswerRequired = fields.TryGetValue("DirectAnswerRequired", out value) && bool.TryParse(value, out required)
                 ? required : turn != SemanticTurnType.CommandLike;
             parsed.SocialIntent = turn == SemanticTurnType.DirectQuestion ? "answer" : turn == SemanticTurnType.Statement || turn == SemanticTurnType.Opinion ? "acknowledge_and_react" : "respond";
+            CaptureRawClassifier(trace, parsed);
+            SemanticTurnType beforeMeaning = parsed.TurnType;
+            KnowledgeNeed beforeMeaningNeed = parsed.KnowledgeNeed;
             ApplyMeaningOverride(parsed, original);
+            NoteCorrection(trace, "ApplyMeaningOverride", beforeMeaning != parsed.TurnType || beforeMeaningNeed != parsed.KnowledgeNeed);
+            KnowledgeNeed beforeNoRetrieval = parsed.KnowledgeNeed;
             ApplyNoRetrievalRule(parsed);
+            NoteCorrection(trace, "ApplyNoRetrievalRule", beforeNoRetrieval != parsed.KnowledgeNeed);
             if (parsed.KnowledgeNeed != KnowledgeNeed.None && string.IsNullOrWhiteSpace(parsed.SearchQuery)) parsed.SearchQuery = BuildUsefulSearchQuery(original, parsed.KnowledgeNeed);
             route = parsed;
             return true;
+        }
+
+        private static void CaptureRawClassifier(SemanticRouteTrace trace, SemanticTurnRoute parsed)
+        {
+            if (trace == null || parsed == null) return;
+            trace.HasRawClassifier = true;
+            trace.RawTurnType = parsed.TurnType;
+            trace.RawKnowledgeNeed = parsed.KnowledgeNeed;
+            trace.RawTopic = parsed.Topic ?? string.Empty;
+            trace.RawSubject = parsed.Subject ?? string.Empty;
+            trace.RawSearchQuery = parsed.SearchQuery ?? string.Empty;
+            trace.RawConfidence = parsed.Confidence;
+            trace.RawDirectAnswerRequired = parsed.DirectAnswerRequired;
+        }
+
+        private static void NoteCorrection(SemanticRouteTrace trace, string name, bool changed)
+        {
+            if (trace == null || !changed) return;
+            if (!trace.Corrections.Contains(name)) trace.Corrections.Add(name);
         }
 
         // A deterministic fail-safe, not the primary route. The live path asks the small model first.
@@ -435,7 +481,9 @@ namespace ErenshorDeepSims
 
     internal static class ConnectedBanterThreadPolicy
     {
-        internal const int ManualTailReplies = 1; // A -> B. A third turn remains optional, not automatic.
+        // A -> B -> C -> D at most. Each turn past the first is still earned individually by
+        // SimResponseDecision plus the momentum roll, so this is the ceiling, not the expected length.
+        internal const int ManualTailReplies = SimResponseDecision.MaxResponsesPerLine;
 
         // The only legal seed for B is chat that has already become visible. The caller records A at
         // the final output boundary before invoking this method. If the exact shown opener is not the
@@ -571,7 +619,7 @@ namespace ErenshorDeepSims
             List<ConversationLine> rejectedCandidateNotVisible;
             bool rejectedSeeded = ConnectedBanterThreadPolicy.TryBuildFromVisible(visibleBanter, "Astra", "unshown rejected candidate", out rejectedCandidateNotVisible);
             lines.Add("[DeepSims Social] rejected unshown A cannot seed B: " + Pass(!rejectedSeeded));
-            lines.Add("[DeepSims Social] manual connected banter hard maximum is A plus one tail: " + Pass(ConnectedBanterThreadPolicy.ManualTailReplies == 1));
+            lines.Add("[DeepSims Social] manual connected banter never exceeds the shared response cap: " + Pass(ConnectedBanterThreadPolicy.ManualTailReplies == SimResponseDecision.MaxResponsesPerLine));
             lines.Add("[DeepSims Social] player generation preempts autonomous tail: " + Pass(ConversationTurnGuard.IsStale(4, 5)));
             long continued = state.BeginPlayerTurn("Player", "yeah, but healing looks fun too", "class role preferences", DateTime.UtcNow.AddSeconds(4));
             lines.Add("[DeepSims Social] player continues active thread: " + Pass(continued == thread));

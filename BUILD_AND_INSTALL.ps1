@@ -1,7 +1,11 @@
 param(
     [string]$GameDir = "",
     [string]$LunarisLibDir = "",
-    [switch]$BuildCompanionMods
+    [switch]$BuildCompanionMods,
+    # Compile against the real installed Erenshor/Lunaris assemblies and report the result (path,
+    # SHA-256) WITHOUT copying the DLL into the live plugins folder and WITHOUT touching an already-
+    # running game's loaded plugin. Use this to verify a candidate build before deciding to install it.
+    [switch]$BuildOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -172,7 +176,7 @@ try {
     $lunarisInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($LunarisDll)
     $lunarisHash = (Get-FileHash -Algorithm SHA256 -Path $LunarisDll).Hash.ToLowerInvariant()
 
-    Write-Host "Building Deep Sims 0.7.4 as a native Lunaris plugin..." -ForegroundColor Cyan
+    Write-Host "Building Deep Sims 0.7.6 as a native Lunaris plugin..." -ForegroundColor Cyan
     Write-Host "  Game:    $GameDir"
     Write-Host "  Lunaris: $LunarisDll"
     Write-Host "  Version: $($lunarisInfo.FileVersion)"
@@ -182,17 +186,43 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Compilation failed. Copy the compiler errors and send them to me." }
     if (-not (Test-Path $TempDll)) { throw "Compiler reported success but did not produce $TempDll" }
 
-    # Copy only after a complete successful compile so Lunaris' file watcher never sees a partial DLL.
-    Copy-Item -LiteralPath $TempDll -Destination $OutDll -Force
+    if ($BuildOnly) {
+        $BuildOutputDir = Join-Path $ScriptRoot "build-output"
+        New-Item -ItemType Directory -Force -Path $BuildOutputDir | Out-Null
+        $CandidateDll = Join-Path $BuildOutputDir "ErenshorDeepSims.dll"
+        Copy-Item -LiteralPath $TempDll -Destination $CandidateDll -Force
+        $candidateHash = (Get-FileHash -Algorithm SHA256 -Path $CandidateDll).Hash.ToLowerInvariant()
+        Write-Host ""
+        Write-Host "Deep Sims 0.7.6 compiled successfully (BuildOnly - nothing installed)." -ForegroundColor Green
+        Write-Host "  Candidate DLL: $CandidateDll"
+        Write-Host "  SHA256:        $candidateHash"
+        if (Test-Path $OutDll) {
+            $installedHash = (Get-FileHash -Algorithm SHA256 -Path $OutDll).Hash.ToLowerInvariant()
+            Write-Host "  Installed DLL: $OutDll"
+            Write-Host "  Installed SHA256: $installedHash"
+            Write-Host "  Match installed: $($candidateHash -eq $installedHash)"
+        }
+        else {
+            Write-Host "  No DLL currently installed at $OutDll."
+        }
+    }
+    else {
+        $erenshorRunning = @(Get-Process -Name "Erenshor" -ErrorAction SilentlyContinue).Count -gt 0
+        if ($erenshorRunning) {
+            throw "Erenshor is currently running. Refusing to replace the installed plugin DLL while the game is running - close the game first, or rerun with -BuildOnly to just compile."
+        }
+        # Copy only after a complete successful compile so Lunaris' file watcher never sees a partial DLL.
+        Copy-Item -LiteralPath $TempDll -Destination $OutDll -Force
 
-    Write-Host ""
-    Write-Host "Deep Sims 0.7.4 installed as a native Lunaris plugin." -ForegroundColor Green
-    Write-Host "  Plugin: $OutDll"
-    Write-Host "  Config: $ConfigRoot\erenshordeepsims.lpcfg"
-    Write-Host "  Memory: $MemoryDir"
-    Write-Host ""
-    Write-Host "Lunaris runtime libraries are NOT copied into the plugin folder by this script."
-    Write-Host "Use /aistatus, /dsims, /dssession, /dsperf, and the normal Deep Sims chat commands after launch."
+        Write-Host ""
+        Write-Host "Deep Sims 0.7.6 installed as a native Lunaris plugin." -ForegroundColor Green
+        Write-Host "  Plugin: $OutDll"
+        Write-Host "  Config: $ConfigRoot\erenshordeepsims.lpcfg"
+        Write-Host "  Memory: $MemoryDir"
+        Write-Host ""
+        Write-Host "Lunaris runtime libraries are NOT copied into the plugin folder by this script."
+        Write-Host "Use /aistatus, /dsims, /dssession, /dsperf, and the normal Deep Sims chat commands after launch."
+    }
 }
 finally {
     if (Test-Path $TempDir) { Remove-Item -LiteralPath $TempDir -Recurse -Force -ErrorAction SilentlyContinue }

@@ -14,8 +14,8 @@ using System.Text.RegularExpressions;
 using UnityEngine;
 using ForgottenRoads.StandaloneUi;
 
-[assembly: AssemblyVersion("0.7.4.0")]
-[assembly: AssemblyFileVersion("0.7.4.0")]
+[assembly: AssemblyVersion("0.7.6.0")]
+[assembly: AssemblyFileVersion("0.7.6.0")]
 
 namespace ErenshorDeepSims
 {
@@ -26,7 +26,7 @@ namespace ErenshorDeepSims
     {
         public const string PluginGuid = "forgetwhtuno.erenshor.deepsims";
         public const string PluginName = "Erenshor Deep Sims";
-        public const string PluginVersion = "0.7.4";
+        public const string PluginVersion = "0.7.6";
 
         internal static DeepSimsPlugin Instance;
         private static int _instanceSerialCounter;
@@ -41,6 +41,8 @@ namespace ErenshorDeepSims
         private IDeepSimsLog Logger { get { return _log ?? NullDeepSimsLog.Instance; } }
 
         private Harmony _harmony;
+        private bool _runtimeHooksReady;
+        private string _runtimeHookFailure = string.Empty;
         private DeepSimsSuiteAuraProvider _auraProvider;
         private readonly ConcurrentQueue<Action> _mainThreadActions = new ConcurrentQueue<Action>();
         private readonly SemaphoreSlim _inferenceGate = new SemaphoreSlim(1, 1);
@@ -191,7 +193,7 @@ namespace ErenshorDeepSims
 
         // Bumped when a release needs to rewrite a previously-shipped default. Migrations run once
         // and then respect whatever the user has chosen.
-        private const int CurrentConfigVersion = 3;
+        private const int CurrentConfigVersion = 4;
 
         internal DeepSimsConfigEntry<int> ConfigVersionConfig;
         internal DeepSimsConfigEntry<bool> EnabledConfig;
@@ -270,6 +272,23 @@ namespace ErenshorDeepSims
         internal DeepSimsConfigEntry<string> SocialActivityPresetConfig;
         internal DeepSimsConfigEntry<string> AdaptiveTownZonesConfig;
         internal DeepSimsConfigEntry<bool> VerboseLoggingConfig;
+
+        // The ONE canonical model every Deep Sims Ollama call must use. After the one-time
+        // ConfigVersion-gated migration above, ModelConfig.Value already IS this value; the property
+        // exists so every call site consumes a single named seam instead of reading ModelConfig
+        // independently, and so a missing/blank config can never silently produce an empty model
+        // string in a live request.
+        internal string ResolvedModel
+        {
+            get
+            {
+                string configured = ModelConfig == null ? null : ModelConfig.Value;
+                return string.IsNullOrWhiteSpace(configured) ? DeepSimsModelResolution.CanonicalModel : configured.Trim();
+            }
+        }
+        internal DeepSimsConfigEntry<bool> PromptCaptureEnabledConfig;
+        internal DeepSimsConfigEntry<int> PromptCaptureMaxFilesConfig;
+        internal DeepSimsConfigEntry<bool> PromptCaptureIncludeClassifierConfig;
 
         private void InitializeConfigEntries()
         {
@@ -350,6 +369,191 @@ namespace ErenshorDeepSims
             SocialActivityPresetConfig = new DeepSimsConfigEntry<string>(delegate { return _settings.SocialActivityPreset; }, delegate(string value) { _settings.SocialActivityPreset = value; });
             AdaptiveTownZonesConfig = new DeepSimsConfigEntry<string>(delegate { return _settings.AdaptiveTownZones; }, delegate(string value) { _settings.AdaptiveTownZones = value; });
             VerboseLoggingConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.VerboseLogging; }, delegate(bool value) { _settings.VerboseLogging = value; });
+            PromptCaptureEnabledConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.PromptCaptureEnabled; }, delegate(bool value) { _settings.PromptCaptureEnabled = value; });
+            PromptCaptureMaxFilesConfig = new DeepSimsConfigEntry<int>(delegate { return _settings.PromptCaptureMaxFiles; }, delegate(int value) { _settings.PromptCaptureMaxFiles = value; });
+            PromptCaptureIncludeClassifierConfig = new DeepSimsConfigEntry<bool>(delegate { return _settings.PromptCaptureIncludeClassifier; }, delegate(bool value) { _settings.PromptCaptureIncludeClassifier = value; });
+        }
+
+        // Sim-to-Sim linkage handoff. Set at the end of an accepted direct reply so the following
+        // connected turn can record exactly which text it received. Diagnostic only.
+        private int _promptCaptureParentRequestId;
+        private string _promptCaptureParentSpeaker = string.Empty;
+        private string _promptCaptureParentRawCandidate = string.Empty;
+        private string _promptCaptureParentAcceptedVisible = string.Empty;
+
+        private void NotePromptCaptureConnectedParent(int requestId, string speaker, string rawCandidate, string acceptedVisible)
+        {
+            if (requestId <= 0) return;
+            try
+            {
+                _promptCaptureParentRequestId = requestId;
+                _promptCaptureParentSpeaker = speaker ?? string.Empty;
+                _promptCaptureParentRawCandidate = rawCandidate ?? string.Empty;
+                _promptCaptureParentAcceptedVisible = acceptedVisible ?? string.Empty;
+            }
+            catch { }
+        }
+
+        private void ApplyPromptCaptureConnectedParent(int conversationTurnIndex)
+        {
+            if (_promptCaptureParentRequestId <= 0) return;
+            PromptCaptureScope.DescribeConnectedTurn(_promptCaptureParentRequestId, conversationTurnIndex,
+                _promptCaptureParentSpeaker, _promptCaptureParentRawCandidate, _promptCaptureParentAcceptedVisible);
+        }
+
+        // Copies ONLY the bounded values that actually became prompt text. Nothing here retains a
+        // reference to a live snapshot, and rejected memory candidates are never serialized.
+        private void DescribeDirectReplyCapture(SimSnapshot speaker, WorldSnapshot world, IList<ConversationLine> thread,
+            WikiResult wiki, SemanticTurnRoute route, SimMemory speakerMemory, string sessionSummary)
+        {
+            try
+            {
+                if (speaker != null)
+                    PromptCaptureScope.DescribeSpeaker(speaker.Name, speaker.ClassName, speaker.Level);
+                if (route != null)
+                    PromptCaptureScope.DescribeEffectiveRoute(route.TurnType.ToString(), route.KnowledgeNeed.ToString(),
+                        route.Topic, route.Subject, route.SocialIntent);
+                string zone = world == null ? (speaker == null ? string.Empty : speaker.Scene) : world.Scene;
+                string currentEncounter = world != null && world.Outing != null ? world.Outing.CurrentEncounter : string.Empty;
+                string lastEncounter = world != null && world.Outing != null ? world.Outing.LastEncounter : string.Empty;
+                string membership = DescribePartyMembershipForCapture(world);
+                string roles = speaker != null && speaker.RoleAssignmentsKnown && speaker.AssignedRoles != null && speaker.AssignedRoles.Count > 0
+                    ? string.Join("/", new List<string>(speaker.AssignedRoles).ToArray()) : string.Empty;
+                PromptCaptureScope.DescribeWorld(zone, currentEncounter, lastEncounter, membership,
+                    speaker == null ? string.Empty : speaker.GuildName, roles, speaker == null ? string.Empty : speaker.Personality);
+                PromptCaptureScope.DescribeSessionSummary(sessionSummary);
+
+                // Re-select using the SAME production selection calls PromptBuilder used, so the packet
+                // records exactly the memory that reached the model - not the whole store.
+                if (speakerMemory != null)
+                {
+                    string latest = thread == null || thread.Count == 0 || thread[thread.Count - 1] == null
+                        ? string.Empty : thread[thread.Count - 1].Text;
+                    List<RelevantMemory> selected = MemoryRelevance.Select(speakerMemory, latest, 2);
+                    List<PromptCaptureMemoryItem> items = new List<PromptCaptureMemoryItem>();
+                    if (selected != null)
+                        for (int i = 0; i < selected.Count; i++)
+                            if (selected[i] != null) items.Add(new PromptCaptureMemoryItem(selected[i].Source, selected[i].Text));
+                    // Candidate pool mirrors MemoryRelevance.Select's inputs so the count is meaningful
+                    // for later relevance-threshold experiments. Only the COUNT is kept; rejected
+                    // candidates are never serialized.
+                    int candidateCount =
+                        (speakerMemory.OutingSummaries == null ? 0 : speakerMemory.OutingSummaries.Count) +
+                        (speakerMemory.ImportantMemories == null ? 0 : speakerMemory.ImportantMemories.Count) +
+                        (speakerMemory.RecentEvents == null ? 0 : speakerMemory.RecentEvents.Count);
+                    PromptCaptureScope.DescribeSelectedMemory(items, candidateCount);
+
+                    List<SimPreferenceMemory> preferences = PreferenceMemoryPolicy.Select(speakerMemory.Preferences, latest, 1);
+                    List<string> persona = new List<string>();
+                    if (preferences != null)
+                        for (int i = 0; i < preferences.Count; i++)
+                            if (preferences[i] != null) persona.Add(preferences[i].Statement);
+                    PromptCaptureScope.DescribeSelectedSoftPersona(persona);
+                }
+
+                // Only the bounded extract PromptBuilder hands the model, never a whole fetched page.
+                if (wiki != null)
+                    PromptCaptureScope.DescribeRetrieval(true, DescribeRetrievalKindForCapture(wiki), wiki.SourceLabel,
+                        wiki.Query, wiki.Found, wiki.Found ? BoundCaptureEvidence(wiki.Extract) : string.Empty);
+                else
+                    PromptCaptureScope.DescribeRetrieval(false, string.Empty, string.Empty, string.Empty, false, string.Empty);
+
+                if (thread != null)
+                {
+                    List<PromptCaptureThreadLine> lines = new List<PromptCaptureThreadLine>();
+                    int start = Math.Max(0, thread.Count - 4);
+                    for (int i = start; i < thread.Count; i++)
+                        if (thread[i] != null) lines.Add(new PromptCaptureThreadLine(thread[i].Speaker, thread[i].Text));
+                    PromptCaptureScope.DescribeThread(lines);
+                }
+            }
+            catch { }
+        }
+
+        private static string BoundCaptureEvidence(string value)
+        {
+            // Mirrors PromptBuilder's 1500-char retrieval bound so the packet cannot contain more
+            // evidence than the model actually received.
+            if (string.IsNullOrEmpty(value)) return string.Empty;
+            string clean = value.Replace('\r', ' ').Replace('\n', ' ').Trim();
+            return clean.Length <= 1500 ? clean : clean.Substring(0, 1500).TrimEnd();
+        }
+
+        private static string DescribeRetrievalKindForCapture(WikiResult wiki)
+        {
+            if (wiki == null || string.IsNullOrWhiteSpace(wiki.SourceLabel)) return "unknown";
+            string label = wiki.SourceLabel;
+            if (label.IndexOf("external real-world news", StringComparison.OrdinalIgnoreCase) >= 0) return "ExternalNews";
+            if (label.IndexOf("official", StringComparison.OrdinalIgnoreCase) >= 0) return "OfficialErenshorNews";
+            if (label.IndexOf("wiki", StringComparison.OrdinalIgnoreCase) >= 0) return "GameWiki";
+            return "other";
+        }
+
+        private static string DescribePartyMembershipForCapture(WorldSnapshot world)
+        {
+            try
+            {
+                if (world == null || world.Party == null || world.Party.Count == 0) return string.Empty;
+                List<string> names = new List<string>();
+                for (int i = 0; i < world.Party.Count; i++)
+                    if (world.Party[i] != null && !string.IsNullOrWhiteSpace(world.Party[i].Name)) names.Add(world.Party[i].Name);
+                return string.Join(", ", names.ToArray());
+            }
+            catch { return string.Empty; }
+        }
+
+        // Explicitly diagnostic. Deliberately no hotkey and no general command-surface expansion:
+        // capture is a developer tool and stays opt-in per session.
+        private void HandlePromptCaptureCommand(string argument)
+        {
+            string arg = (argument ?? string.Empty).Trim();
+            if (arg.Length == 0 || string.Equals(arg, "status", StringComparison.OrdinalIgnoreCase))
+            {
+                WriteChat("[DeepSims Capture] " + PromptCapture.StatusLine(), "lightblue");
+                return;
+            }
+            if (string.Equals(arg, "on", StringComparison.OrdinalIgnoreCase))
+            {
+                if (StartPromptCapture())
+                {
+                    WriteChat("[DeepSims Capture] Local prompt capture ON. Packets contain real conversation text and stay on this machine.", "yellow");
+                    WriteChat("[DeepSims Capture] " + PromptCapture.StatusLine(), "lightblue");
+                }
+                else WriteChat("[DeepSims Capture] Could not start prompt capture; see the log.", "red");
+                return;
+            }
+            if (string.Equals(arg, "off", StringComparison.OrdinalIgnoreCase))
+            {
+                PromptCapture.Stop();
+                WriteChat("[DeepSims Capture] Local prompt capture OFF.", "yellow");
+                return;
+            }
+            if (arg.StartsWith("mark", StringComparison.OrdinalIgnoreCase))
+            {
+                string label = arg.Length <= 4 ? string.Empty : arg.Substring(4).Trim();
+                if (label.Length == 0) { WriteChat("[DeepSims Capture] Usage: /dspromptcapture mark <short-label>", "yellow"); return; }
+                PromptCapture.MarkNext(label);
+                WriteChat("[DeepSims Capture] Next captured turn will be labelled '" + PromptCaptureState.Bound(label, 60) + "'.", "lightblue");
+                return;
+            }
+            WriteChat("[DeepSims Capture] Usage: /dspromptcapture [on|off|status|mark <label>]", "yellow");
+        }
+
+        // Local diagnostic capture. Off unless explicitly enabled by config or /dspromptcapture on.
+        private bool StartPromptCapture()
+        {
+            try
+            {
+                int max = PromptCaptureMaxFilesConfig == null ? 100 : Math.Max(1, Math.Min(2000, PromptCaptureMaxFilesConfig.Value));
+                bool includeClassifier = PromptCaptureIncludeClassifierConfig == null || PromptCaptureIncludeClassifierConfig.Value;
+                return PromptCapture.Start(DeepSimsPaths.PromptCaptureRoot, DeepSimsPaths.DataRoot, max, includeClassifier,
+                    delegate(string line) { try { Logger.LogInfo(line); } catch { } });
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning("Prompt capture could not start: " + DiagnosticPrivacy.ExceptionType(ex));
+                return false;
+            }
         }
 
         private void Awake()
@@ -365,6 +569,13 @@ namespace ErenshorDeepSims
             InitializeConfigEntries();
             SyncSocialPerspectiveFromConfig();
             DeepSimsPaths.EnsureDataDirectories(Logger);
+            // Diagnostic prompt capture is opt-in. The directory is only created when it is actually
+            // switched on, so ordinary installs never grow a Diagnostics folder.
+            if (PromptCaptureEnabledConfig != null && PromptCaptureEnabledConfig.Value)
+            {
+                if (StartPromptCapture())
+                    Logger.LogWarning("Deep Sims local prompt capture is ENABLED (developer diagnostic). Packets contain real conversation text and remain on this machine under the Deep Sims Diagnostics directory.");
+            }
             if (DeepSimsPaths.HasLegacyGlobalMemory())
                 Logger.LogWarning("Legacy unscoped Deep Sims memory was preserved under Memory/*.json but is not auto-assigned to any player character. New social history is stored under Memory/Characters/<character-key> to prevent cross-character leakage.");
             bool configChanged = false;
@@ -421,6 +632,28 @@ namespace ErenshorDeepSims
                 configChanged = true;
             }
 
+            // Retire the split Model/ReasoningModel architecture once. Deep Sims previously could
+            // route a request to either model per-call; because Ollama requests carry keep_alive,
+            // that could leave BOTH resident at once. Collapse to the single resolved model and never
+            // read ReasoningModel for live model selection again. Gated on ConfigVersion (not on the
+            // literal values) so it runs exactly once and a later deliberate choice of the legacy
+            // default string is never silently overridden again.
+            if (ConfigVersionConfig.Value < 4)
+            {
+                string migratedModel = DeepSimsModelResolution.Resolve(ModelConfig.Value, ReasoningModelConfig.Value);
+                if (!string.Equals(ModelConfig.Value, migratedModel, StringComparison.Ordinal))
+                {
+                    Logger.LogInfo("Deep Sims migrated to a single canonical model: model=" + migratedModel +
+                        " (the separate primary/reasoning model split is retired; ReasoningMode remains a routing signal only).");
+                    ModelConfig.Value = migratedModel;
+                }
+                // Keep the legacy field in sync so a later reinstall or manual config edit cannot
+                // re-introduce a stale second value; it is not read for model selection after this.
+                if (!string.Equals(ReasoningModelConfig.Value, migratedModel, StringComparison.Ordinal))
+                    ReasoningModelConfig.Value = migratedModel;
+                configChanged = true;
+            }
+
             if (ConfigVersionConfig.Value < CurrentConfigVersion)
             {
                 ConfigVersionConfig.Value = CurrentConfigVersion;
@@ -445,7 +678,19 @@ namespace ErenshorDeepSims
             _perfWarmupUntil = Time.realtimeSinceStartup + 5f;
 
             _harmony = new Harmony(PluginGuid);
-            _harmony.PatchAll(typeof(DeepSimsPlugin).Assembly);
+            try
+            {
+                _harmony.PatchAll(typeof(DeepSimsPlugin).Assembly);
+                _runtimeHooksReady = true;
+                _runtimeHookFailure = string.Empty;
+            }
+            catch (Exception ex)
+            {
+                _runtimeHooksReady = false;
+                _runtimeHookFailure = DiagnosticPrivacy.ExceptionType(ex);
+                try { _harmony.UnpatchSelf(); } catch { }
+                Logger.LogError("Deep Sims runtime hooks unavailable (" + _runtimeHookFailure + "). Core social interception is disabled, but the standalone status UI remains available.");
+            }
 
             // Optional Suite Hub transport. No Hub dependency: registering Aura funcs is a no-op
             // until something actually subscribes, and no assumption is made that Hub exists.
@@ -460,6 +705,7 @@ namespace ErenshorDeepSims
             }
 
             Logger.LogInfo(PluginName + " " + PluginVersion + " loaded. [party-grounding-r2 live-facts+stance-guard] Whole-party Deep Sim enhancement enabled (hard cap 5).");
+            Logger.LogInfo("Deep Sims model=" + ResolvedModel + " single-model pipeline active.");
             StandaloneFallbackUi.Initialize(this, "deepsims", "DEEP SIMS",
                 "Quick social controls. Detailed diagnostics and memory tools remain available through compatibility commands.", 280f,
                 DeepSimsControlApi.GetHubStatus,
@@ -525,9 +771,7 @@ namespace ErenshorDeepSims
             catch { }
 
             // Clear mod-owned static runtime state before a future Lunaris reload can reactivate it.
-            // This never touches standalone companion gameplay state; it only resets Deep Sims' own
-            // legacy follow target and social integration bookkeeping.
-            try { FollowController.Stop(); } catch { }
+            // Deep Sims owns social integration bookkeeping only; movement belongs to Erenshor Follow.
             try { DuelSocialIntegration.ResetRuntimeState(); } catch { }
             try { PvpEventBridge.ResetRuntimeState(); } catch { }
             try { NemesisEventBridge.ResetRuntimeState(); } catch { }
@@ -678,6 +922,7 @@ namespace ErenshorDeepSims
             try
             {
                 StandaloneFallbackUi.Tick(DeepSimsCharacterIdentity.IsLocalCharacterReady());
+                if (!_runtimeHooksReady) return;
                 DeepSimsDiagnostics.Verbose = VerboseLoggingConfig != null && VerboseLoggingConfig.Value;
                 SyncSocialPerspectiveFromConfig();
                 ObserveFramePerformance();
@@ -877,7 +1122,7 @@ namespace ErenshorDeepSims
                     "ms prompt=" + _lastOllamaPromptEvalMs.ToString("0.0") + "ms/" + _lastOllamaPromptTokens + "t (est=" + _lastEstimatedPromptTokens + "t) eval=" + _lastOllamaEvalMs.ToString("0.0") + "ms/" + _lastOllamaEvalTokens +
                     "t attempts=" + _lastOllamaAttempts + " | mode=" + NormalizeInferenceMode(InferenceModeConfig.Value) + " threads=" + (CpuThreadsConfig.Value <= 0 ? "auto" : CpuThreadsConfig.Value.ToString()) +
                     " | reasoning=" + PromptBuilder.NormalizeReasoningMode(ReasoningModeConfig.Value) + "/" + (_lastReasoningEnabled ? "on" : "off") +
-                    " model=" + (string.IsNullOrWhiteSpace(_lastRequestModel) ? ModelConfig.Value : _lastRequestModel) + (_lastReasoningFallback ? "(fallback)" : string.Empty) +
+                    " model=" + (string.IsNullOrWhiteSpace(_lastRequestModel) ? ResolvedModel : _lastRequestModel) + (_lastReasoningFallback ? "(fallback)" : string.Empty) +
                     " | ctx=" + ContextWindowConfig.Value, "lightblue");
                 WriteChat("[DeepSims Perf] frame hitch last=" + _lastFrameHitchMs.ToString("0") + "ms max=" + _maxFrameHitchMs.ToString("0") + "ms | AI overlap last=" +
                     (_lastFrameHitchDuringAi ? "yes" : "no") + " total=" + _frameHitchesDuringAi + "/" + _frameHitchCount + " | threshold=" + Math.Max(25f, FrameHitchThresholdMsConfig.Value).ToString("0") + "ms", "lightblue");
@@ -915,6 +1160,14 @@ namespace ErenshorDeepSims
             {
                 ClearInput(typeText);
                 HandleSeedsCommand(seedsArgument);
+                return true;
+            }
+
+            string promptCaptureArgument;
+            if (ChatCommandParser.TryParsePromptCapture(rawText, out promptCaptureArgument))
+            {
+                ClearInput(typeText);
+                HandlePromptCaptureCommand(promptCaptureArgument);
                 return true;
             }
 
@@ -960,8 +1213,8 @@ namespace ErenshorDeepSims
                 if (string.IsNullOrWhiteSpace(reasoningArgument))
                 {
                     WriteChat("[DeepSims] Reasoning mode: " + PromptBuilder.NormalizeReasoningMode(ReasoningModeConfig.Value) +
-                        "; model: " + (string.IsNullOrWhiteSpace(ReasoningModelConfig.Value) ? ModelConfig.Value : ReasoningModelConfig.Value) +
-                        ". Use /dsreasoning off|selective|always.", "lightblue");
+                        " (routing/diagnostic signal only - every request still uses model=" + ResolvedModel + ")." +
+                        " Use /dsreasoning off|selective|always.", "lightblue");
                     return true;
                 }
                 string requested = reasoningArgument.Trim().ToLowerInvariant();
@@ -972,8 +1225,8 @@ namespace ErenshorDeepSims
                 }
                 ReasoningModeConfig.Value = PromptBuilder.NormalizeReasoningMode(requested);
                 Config.Save();
-                WriteChat("[DeepSims] Reasoning mode set to " + ReasoningModeConfig.Value + ". Reasoning model: " +
-                    (string.IsNullOrWhiteSpace(ReasoningModelConfig.Value) ? ModelConfig.Value : ReasoningModelConfig.Value) + ". /dsperf reports which model handled the last request.", "yellow");
+                WriteChat("[DeepSims] Reasoning mode set to " + ReasoningModeConfig.Value +
+                    ". This only affects routing/diagnostics; model=" + ResolvedModel + " is used for every request. /dsperf reports the last request's details.", "yellow");
                 return true;
             }
 
@@ -1013,13 +1266,17 @@ namespace ErenshorDeepSims
                 ClearInput(typeText);
                 if (string.IsNullOrWhiteSpace(requestedModel))
                 {
-                    WriteChat("[DeepSims] Current model: " + ModelConfig.Value, "lightblue");
+                    WriteChat("[DeepSims] Current model (used for every request): " + ResolvedModel, "lightblue");
                 }
                 else
                 {
                     ModelConfig.Value = requestedModel.Trim();
+                    // Keep the legacy field aligned so a future reinstall/config reset cannot resolve
+                    // to a different value than this explicit choice; it is not read for live model
+                    // selection any more.
+                    if (ReasoningModelConfig != null) ReasoningModelConfig.Value = ModelConfig.Value;
                     Config.Save();
-                    WriteChat("[DeepSims] Model set to '" + ModelConfig.Value + "'. Run /aistatus to verify it is installed.", "yellow");
+                    WriteChat("[DeepSims] Model set to '" + ResolvedModel + "' for every Deep Sims request. Run /aistatus to verify it is installed.", "yellow");
                 }
                 return true;
             }
@@ -1171,29 +1428,6 @@ namespace ErenshorDeepSims
                 return true;
             }
 
-            string followTarget;
-            if (ChatCommandParser.TryParseFollow(rawText, out followTarget))
-            {
-                ClearInput(typeText);
-                if (string.IsNullOrWhiteSpace(followTarget) || string.Equals(followTarget, "off", StringComparison.OrdinalIgnoreCase) || string.Equals(followTarget, "stop", StringComparison.OrdinalIgnoreCase))
-                {
-                    string previous = FollowController.TargetName;
-                    FollowController.Stop();
-                    WriteChat("[DeepSims] Follow stopped" + (string.IsNullOrWhiteSpace(previous) ? "." : ": " + previous + "."), "yellow");
-                    return true;
-                }
-                RefreshSlots();
-                SimSnapshot followSnapshot = _slots.GetSnapshot(followTarget);
-                if (followSnapshot == null) followSnapshot = SimContextReader.FindActiveSim(followTarget);
-                if (followSnapshot == null || followSnapshot.RuntimeSim == null)
-                {
-                    WriteChat("[DeepSims] Could not find an active Sim to follow: " + followTarget, "yellow");
-                    return true;
-                }
-                if (FollowController.Start(followSnapshot.RuntimeSim)) WriteChat("[DeepSims] Following " + followSnapshot.Name + ". Press movement, click, or use /dsfollow off to stop.", "yellow");
-                return true;
-            }
-
             if (ChatCommandParser.IsGuardTest(rawText))
             {
                 ClearInput(typeText);
@@ -1209,6 +1443,7 @@ namespace ErenshorDeepSims
                 // in Roleplay perspective behavior (identity block, thread rules, direct-reply
                 // fallback, spoken-style filter) could pass unnoticed by anyone running /dsguardtest.
                 guardResults.AddRange(RoleplayDeterministicTests.RunSelfTests());
+                guardResults.AddRange(SimResponseDecision.RunSelfTests());
                 for (int i = 0; i < guardResults.Count; i++) WriteChat(guardResults[i], "lightblue");
                 return true;
             }
@@ -1831,12 +2066,13 @@ namespace ErenshorDeepSims
             Dictionary<string, string> data = new Dictionary<string, string>(StringComparer.Ordinal);
             data["schemaVersion"] = schemaVersion.ToString();
             data["source"] = "ErenshorDeepSims";
-            data["available"] = "true";
+            data["available"] = _runtimeHooksReady ? "true" : "false";
+            data["runtimeHooks"] = _runtimeHooksReady ? "ready" : "unavailable";
+            if (!_runtimeHooksReady && !string.IsNullOrWhiteSpace(_runtimeHookFailure)) data["runtimeHookFailure"] = _runtimeHookFailure;
             data["module"] = PluginName;
             data["version"] = PluginVersion;
             data["enabled"] = EnabledConfig != null && EnabledConfig.Value ? "true" : "false";
-            data["model"] = DeepSimsControlPolicy.SafePublicModelLabel(
-                ModelConfig == null ? null : ModelConfig.Value);
+            data["model"] = DeepSimsControlPolicy.SafePublicModelLabel(ResolvedModel);
             // Hub/control wire choices are explicit normalized strings. Never round-trip through
             // enum.ToString(): SocialExpressionMode declares Llm while the supported stored/public
             // wire value is LLM, and ordinal Hub validation intentionally rejects casing drift.
@@ -1925,6 +2161,7 @@ namespace ErenshorDeepSims
 
         internal string BuildControlHubStatus()
         {
+            if (!_runtimeHooksReady) return "Compatibility unavailable" + (string.IsNullOrWhiteSpace(_runtimeHookFailure) ? string.Empty : " (" + _runtimeHookFailure + ")");
             string enabled = EnabledConfig != null && EnabledConfig.Value ? "Enabled" : "Disabled";
             string ollama;
             lock (_responseStatusLock) ollama = _responseStatus;
@@ -2533,27 +2770,72 @@ namespace ErenshorDeepSims
         private async Task<SemanticTurnRoute> ClassifySemanticTurnAsync(string message, string recentTopic)
         {
             SemanticTurnRoute fallback = SemanticTurnRouter.Fallback(message);
+            // The classifier is captured as its own linked packet so raw classification can later be
+            // compared against the effective route. The lease is null whenever capture is off.
+            PromptCaptureLease captureLease = PromptCaptureScope.BeginClassifier("semantic_classifier", PromptCaptureScope.CurrentRequestId);
             try
             {
-                string model = ModelConfig == null || string.IsNullOrWhiteSpace(ModelConfig.Value) ? "qwen3.5:2b" : ModelConfig.Value.Trim();
+                // Classification uses the SAME canonical model as every other Deep Sims call. This used
+                // to independently fall back to the smaller legacy default here, which is exactly how
+                // a classifier request could end up on a different resident model than generation.
+                // See DeepSimsModelResolution / ResolvedModel.
+                string model = ResolvedModel;
+                List<ChatMessage> classifierMessages = SemanticTurnRouter.BuildClassificationPrompt(message, recentTopic);
+                if (captureLease != null)
+                {
+                    PromptCaptureScope.DescribeConfiguredModel(ModelConfig == null ? string.Empty : ModelConfig.Value);
+                    PromptCaptureScope.DescribeGeneration(model, false, 1024, 0.60f, 72, KeepAliveConfig.Value,
+                        NormalizeInferenceMode(InferenceModeConfig.Value) ?? "Auto", Math.Max(0, CpuThreadsConfig.Value), classifierMessages);
+                }
                 string raw = await _ollama.ChatAsync(EndpointConfig.Value, model,
-                    SemanticTurnRouter.BuildClassificationPrompt(message, recentTopic),
+                    classifierMessages,
                     Math.Max(5, Math.Min(15, TimeoutSecondsConfig.Value)), 1024, KeepAliveConfig.Value,
-                    NormalizeInferenceMode(InferenceModeConfig.Value) ?? "Auto", Math.Max(0, CpuThreadsConfig.Value)).ConfigureAwait(false);
+                    NormalizeInferenceMode(InferenceModeConfig.Value) ?? "Auto", Math.Max(0, CpuThreadsConfig.Value),
+                    captureLease == null ? null : captureLease.Packet).ConfigureAwait(false);
+                if (captureLease != null) PromptCaptureScope.RecordRawModelContent(raw);
                 SemanticTurnRoute parsed;
-                if (SemanticTurnRouter.TryParse(raw, message, out parsed) && parsed.Confidence >= 0.50)
+                SemanticTurnRouter.SemanticRouteTrace trace = captureLease == null ? null : new SemanticTurnRouter.SemanticRouteTrace();
+                if (SemanticTurnRouter.TryParse(raw, message, out parsed, trace) && parsed.Confidence >= 0.50)
                 {
                     if (VerboseLoggingConfig != null && VerboseLoggingConfig.Value)
                         Logger.LogDebug("semantic route type=" + parsed.TurnType + " knowledge=" + parsed.KnowledgeNeed + " confidence=" + parsed.Confidence.ToString("0.00") + " topic=" + parsed.Topic);
+                    RecordClassifierCapture(captureLease, trace, parsed, "accepted");
                     return parsed;
                 }
+                RecordClassifierCapture(captureLease, trace, fallback, "below_confidence_threshold");
             }
             catch (Exception ex)
             {
                 if (VerboseLoggingConfig != null && VerboseLoggingConfig.Value)
                     Logger.LogDebug("semantic route fallback=" + DiagnosticPrivacy.ExceptionType(ex));
+                RecordClassifierCapture(captureLease, null, fallback, "classifier_error");
+            }
+            finally
+            {
+                if (captureLease != null) captureLease.Dispose();
             }
             return fallback;
+        }
+
+        // Diagnostic only. Records what the classifier model returned, what the effective route became
+        // after the deterministic corrections in SemanticTurnRouter, and which corrections fired.
+        private static void RecordClassifierCapture(PromptCaptureLease lease, SemanticTurnRouter.SemanticRouteTrace trace,
+            SemanticTurnRoute effective, string outcome)
+        {
+            if (lease == null) return;
+            try
+            {
+                if (trace != null && trace.HasRawClassifier)
+                    PromptCaptureScope.DescribeRawClassifier(trace.RawTurnType.ToString(), trace.RawKnowledgeNeed.ToString(),
+                        trace.RawTopic, trace.RawSubject, trace.RawSearchQuery, trace.RawConfidence,
+                        trace.RawDirectAnswerRequired, trace.Corrections);
+                if (effective != null)
+                    PromptCaptureScope.DescribeEffectiveRoute(effective.TurnType.ToString(), effective.KnowledgeNeed.ToString(),
+                        effective.Topic, effective.Subject, effective.SocialIntent);
+                PromptCaptureScope.RecordGrounding(outcome == "accepted" ? "accepted" : "unknown", outcome);
+                PromptCaptureScope.RecordFinal(false, "semantic_classifier", string.Empty);
+            }
+            catch { }
         }
 
         private async Task<WikiResult> ResolveRoutedKnowledgeAsync(string message, WorldSnapshot world,
@@ -3232,6 +3514,31 @@ namespace ErenshorDeepSims
             if (active.Count == 0) return;
 
             WorldSnapshot world = BuildAwareWorld();
+
+            // Deterministic reply-worthiness gate, evaluated BEFORE any classification/retrieval/
+            // generation call. A line that does not need an immediate directed reply already became
+            // ordinary heard conversation (RecordSharedDialogueContext/_socialSession.BeginPlayerTurn
+            // ran unconditionally before this method was ever invoked) and may still inform later
+            // autonomous chatter - it is simply not answered right now. forceResponse (an explicit
+            // guarantee, e.g. from a caller that already decided a reply is owed) bypasses this gate.
+            if (!forceResponse)
+            {
+                List<string> currentPartySimNames = new List<string>();
+                if (world.Party != null)
+                    for (int i = 0; i < world.Party.Count; i++)
+                        if (world.Party[i] != null && !string.IsNullOrWhiteSpace(world.Party[i].Name))
+                            currentPartySimNames.Add(world.Party[i].Name);
+                string playerNameForShouldReply = world.Player != null ? world.Player.Name : null;
+                ShouldReplyDeterministic.Result shouldReplyResult =
+                    ShouldReplyDeterministic.Evaluate(playerMessage, playerNameForShouldReply, currentPartySimNames);
+                Logger.LogDebug("[DeepSims][ShouldReply] reply=" + shouldReplyResult.Reply + " reason=" + shouldReplyResult.Reason);
+                if (!shouldReplyResult.Reply)
+                {
+                    SetResponseStatus("idle", "heard chat only (no direct hook)");
+                    return;
+                }
+            }
+
             PartyReplyIntent replyIntent = PartyReplyIntentClassifier.Classify(playerMessage);
             string directPreferenceTopic = DirectPreferenceTopicPolicy.Resolve(playerMessage, replyIntent);
             active = world.Party == null ? new List<SimSnapshot>() : new List<SimSnapshot>(world.Party);
@@ -3312,13 +3619,39 @@ namespace ErenshorDeepSims
                         thread.Add(new ConversationLine(playerName, playerMessage));
 
                     SimMemory speakerMemory = requestMemory.LoadForPrompt(speaker);
+                    string sessionSummaryForPrompt = _socialSession.Summary();
+                    // Authoritative-unknown-recent-event gate: when Deep Sims itself has no verified
+                    // completed-encounter result, the correct answer is already known ("no data") and
+                    // asking the model to improvise one is exactly what the real-packet labs found
+                    // qwen3.5:4b cannot reliably resist, even when told outright to admit uncertainty.
+                    // This makes ZERO Ollama calls for this turn.
+                    string deterministicUnknownEventReply;
+                    bool useDeterministicUnknownEventReply = RecentEventQuestionPolicy.TryGetDeterministicUnknownReply(
+                        playerMessage, world, speaker.Name, out deterministicUnknownEventReply);
                     List<ChatMessage> messages = PromptBuilder.BuildCompactDirectPartyReply(speaker, speakerMemory, world,
-                        thread, wiki, semanticRoute, _socialSession.Summary());
-                    string first = await TimedChatAsync(messages, semanticRoute != null && semanticRoute.DirectAnswerRequired);
+                        thread, wiki, semanticRoute, sessionSummaryForPrompt);
+                    // Local diagnostic packet for this logical request. Null unless capture is enabled;
+                    // disposal writes the packet and never throws into this pipeline.
+                    string first;
+                    DateTime due;
+                    bool groupUsedTemplate = false;
+                    using (PromptCaptureLease captureLease = PromptCaptureScope.Begin("direct_party_reply", "player_reply"))
+                    {
+                    if (captureLease != null)
+                        DescribeDirectReplyCapture(speaker, world, thread, wiki, semanticRoute, speakerMemory, sessionSummaryForPrompt);
+                    if (useDeterministicUnknownEventReply)
+                    {
+                        first = deterministicUnknownEventReply;
+                        groupUsedTemplate = true;
+                        PromptCaptureScope.RecordFallback(true, "deterministic_unknown_recent_event");
+                        Logger.LogDebug("[DeepSims][RecentEvent] authoritativeUnknownHandledDeterministically=true speaker=" + speaker.Name);
+                    }
+                    else
+                    {
+                    first = await TimedChatAsync(messages, semanticRoute != null && semanticRoute.DirectAnswerRequired);
                     first = TextSanitizer.CleanReply(first, speaker.Name, playerName, Math.Max(80, MaxReplyCharactersConfig.Value));
                     first = await GroundPartyLineAsync(first, messages, speaker, speakerMemory, world, null, wiki, forceResponse, playerMessage,
                         null, replyIntent, "group", partyRequest).ConfigureAwait(false);
-                    bool groupUsedTemplate = false;
                     if (IsNoMessage(first))
                     {
                         SetResponseStatus("rejected", "no grounded first reply survived");
@@ -3330,6 +3663,7 @@ namespace ErenshorDeepSims
                         if (PartyReplyIntentClassifier.IsSubjective(replyIntent) && TryRenderSubjectiveReplyForPerspective(playerMessage, speaker, replyIntent, out subjectiveFallback))
                             first = subjectiveFallback;
                         else first = DirectResponseFallback.Render(playerMessage, semanticRoute, speaker, lookupExpected && (wiki == null || !wiki.Found));
+                    }
                     }
                     // Central Roleplay content guard: this path (a direct player question answered in
                     // party chat) previously ran no roleplay-specific check at all -- ApplyRoleplayAutonomousGuard
@@ -3355,13 +3689,17 @@ namespace ErenshorDeepSims
                     }
                     LogRoleplayDiagnostic("group", speaker.Name, groupUsedTemplate, groupGuardRan, groupGuardChanged, groupGuardRejected,
                         replyIntent.ToString(), speaker.ClassName, wiki != null, 0, groupGuardRejected ? "suppressed" : "accepted", groupFallbackReason);
+                    PromptCaptureScope.RecordRoleplayGuard(groupGuardRan, groupGuardChanged, groupGuardRejected, groupFallbackReason);
+                    PromptCaptureScope.RecordPostGuardContent(first);
                     if (groupGuardRejected || IsNoMessage(first))
                     {
                         first = DirectResponseFallback.Render(playerMessage, semanticRoute, speaker, lookupExpected && (wiki == null || !wiki.Found));
+                        PromptCaptureScope.RecordFallback(true, "direct_response_fallback");
                     }
+                    else if (groupUsedTemplate) PromptCaptureScope.RecordFallback(true, "template_opener");
 
                     if (stale()) { NoteStaleDiscard("after-inference", isNewsAnswer ? "news" : null, conversationGeneration); return; }
-                    DateTime due = DateTime.UtcNow.AddSeconds(CalculateTypingDelay(first));
+                    due = DateTime.UtcNow.AddSeconds(CalculateTypingDelay(first));
                     if (!QueueGroupMessage(due, speaker, first, world, false, false, null, conversationGeneration,
                         isNewsAnswer ? "news" : null, partyRequest, directPreferenceTopic, null))
                     {
@@ -3380,7 +3718,16 @@ namespace ErenshorDeepSims
                     }
                     if (isNewsAnswer) Logger.LogDebug("news answer scheduled generation=" + conversationGeneration);
                     SetResponseStatus("queued", speaker.Name + " reply waiting on typing delay");
+                    // The visible line is now final for this turn. Recorded separately from the raw
+                    // model content and from the post-guard content.
+                    PromptCaptureScope.RecordFinal(true, groupUsedTemplate ? "template" : "LLM", first);
+                    // Hand the Sim-to-Sim tail the linkage it needs: B must be tied to the ACCEPTED
+                    // VISIBLE text of A, which is `first` here whether that came from the model or from
+                    // a deterministic opener.
+                    NotePromptCaptureConnectedParent(PromptCaptureScope.CurrentRequestId, speaker.Name,
+                        PromptCaptureScope.Current == null ? string.Empty : PromptCaptureScope.Current.RawModelContent, first);
                     thread.Add(new ConversationLine(speaker.Name, first));
+                    }
 
                     // The player's own reply is already generated and queued. Hand the model back now so
                     // a follow-up /p is not stuck behind the whole Sim-to-Sim tail; the continuation
@@ -3390,7 +3737,9 @@ namespace ErenshorDeepSims
 
                     if (allowFollowUp && ConversationThreadsConfig.Value && SimToSimConfig.Value && active.Count > 1)
                     {
-                        int cap = Math.Max(1, Math.Min(3, MaxAutonomousThreadRepliesConfig.Value));
+                        // The Sim who answers the player is response #1; SimResponseDecision.MaxResponsesPerLine
+                        // bounds the whole exchange, so the tail may add at most two more.
+                        int cap = Math.Max(1, Math.Min(SimResponseDecision.MaxResponsesPerLine, MaxAutonomousThreadRepliesConfig.Value));
                         if (lookupExpected) cap = Math.Min(cap, 2); // acknowledgement + answer + at most one tail
                         QueueRequestWork(RequestLane.Autonomous, "party-tail", stale, async delegate
                         {
@@ -3471,7 +3820,8 @@ namespace ErenshorDeepSims
 
                     if (ConversationThreadsConfig.Value && SimToSimConfig.Value && active.Count > 2)
                     {
-                        int cap = 1;
+                        // The Deep Sim that answered the vanilla line is response #1; two more may follow.
+                        int cap = Math.Max(1, SimResponseDecision.MaxResponsesPerLine - 1);
                         QueueRequestWork(RequestLane.Autonomous, "vanilla-tail", stale, async delegate
                         {
                             await ContinueConversationThreadAsync(thread, active, world, speaker.Name, due, cap, null, false, conversationGeneration, false).ConfigureAwait(false);
@@ -3881,12 +4231,14 @@ namespace ErenshorDeepSims
                     {
                         List<ConversationLine> thread = new List<ConversationLine>(recentContext);
                         thread.Add(new ConversationLine(speaker.Name, first));
-                        int cap = Math.Max(2, Math.Min(3, MaxAutonomousThreadRepliesConfig.Value));
+                        // An autonomous opener is not itself a response, so the tail carries the full
+                        // MaxResponsesPerLine budget: up to three other Sims may answer it.
+                        int cap = Math.Max(1, Math.Min(SimResponseDecision.MaxResponsesPerLine, MaxAutonomousThreadRepliesConfig.Value));
                         string threadGroundingFact = evt.HasSeed ? evt.VerifiedFact : null;
                         QueueRequestWork(RequestLane.Autonomous, "autonomous-tail", stale, async delegate
                         {
                             await ContinueConversationThreadAsync(thread, active, world, speaker.Name, due,
-                                cap - 1, null, forceMessage, conversationGeneration, false, threadGroundingFact, intent).ConfigureAwait(false);
+                                cap, null, forceMessage, conversationGeneration, false, threadGroundingFact, intent).ConfigureAwait(false);
                         });
                     }
                 }
@@ -3983,44 +4335,37 @@ namespace ErenshorDeepSims
         {
             Stopwatch sw = Stopwatch.StartNew();
             _lastEstimatedPromptTokens = PromptBuilder.EstimateTokenCount(messages);
-            bool reasoning = PromptBuilder.ShouldUseReasoning(ReasoningModeConfig == null ? "Selective" : ReasoningModeConfig.Value, messages);
-            string primaryModel = ModelConfig == null || string.IsNullOrWhiteSpace(ModelConfig.Value) ? "qwen3.5:2b" : ModelConfig.Value.Trim();
-            string configuredReasoningModel = ReasoningModelConfig == null ? string.Empty : ReasoningModelConfig.Value == null ? string.Empty : ReasoningModelConfig.Value.Trim();
-            bool useReasoningModel = (reasoning || preferStrongModel) && configuredReasoningModel.Length > 0 &&
-                !string.Equals(configuredReasoningModel, primaryModel, StringComparison.OrdinalIgnoreCase);
-            string requestModel = useReasoningModel ? configuredReasoningModel : primaryModel;
+            // `reasoning`/`preferStrongModel` are DIAGNOSTIC signals only now: was this turn shaped
+            // like a factual/history/correction question, or explicitly flagged by the caller as
+            // quality-sensitive (e.g. background session-summary reflection, a required direct
+            // answer)? Neither selects a different model any more - Deep Sims requests exactly one
+            // canonical model (ResolvedModel) for every call, so keep_alive can only ever keep that
+            // one model resident. See DeepSimsModelResolution for how ResolvedModel itself is chosen.
+            bool reasoning = PromptBuilder.ShouldUseReasoning(ReasoningModeConfig == null ? "Selective" : ReasoningModeConfig.Value, messages) ||
+                preferStrongModel;
+            string requestModel = ResolvedModel;
             _lastReasoningEnabled = reasoning;
             _lastReasoningFallback = false;
             _lastRequestModel = requestModel;
             _aiRequestActive = true;
+            // Diagnostic capture rides along on the ambient packet opened by the calling reply flow.
+            // When capture is off this is null everywhere and nothing below changes.
+            PromptCapturePacket capturePacket = PromptCaptureScope.Current;
+            if (capturePacket != null)
+            {
+                PromptCaptureScope.DescribeConfiguredModel(ModelConfig == null ? string.Empty : ModelConfig.Value);
+                PromptCaptureScope.DescribeGeneration(requestModel, false,
+                    Math.Max(1024, ContextWindowConfig.Value), 0.60f, 72, KeepAliveConfig.Value,
+                    NormalizeInferenceMode(InferenceModeConfig.Value) ?? "Auto", Math.Max(0, CpuThreadsConfig.Value), messages);
+            }
             try
             {
-                string reply;
-                Exception reasoningFailure = null;
-                try
-                {
-                    reply = await _ollama.ChatAsync(EndpointConfig.Value, requestModel, messages,
-                        Math.Max(5, TimeoutSecondsConfig.Value), Math.Max(1024, ContextWindowConfig.Value), KeepAliveConfig.Value,
-                        NormalizeInferenceMode(InferenceModeConfig.Value) ?? "Auto", Math.Max(0, CpuThreadsConfig.Value)).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    if (!useReasoningModel) throw;
-                    reasoningFailure = ex;
-                    reply = null;
-                }
-                if (reasoningFailure != null)
-                {
-                    _lastReasoningFallback = true;
-                    _lastRequestModel = primaryModel;
-                    Logger.LogWarning("Reasoning model '" + requestModel + "' failed; retrying once with primary model '" +
-                        primaryModel + "'. " + reasoningFailure.GetType().Name + ": " + reasoningFailure.Message);
-                    reply = await _ollama.ChatAsync(EndpointConfig.Value, primaryModel, messages,
-                        Math.Max(5, TimeoutSecondsConfig.Value), Math.Max(1024, ContextWindowConfig.Value), KeepAliveConfig.Value,
-                        NormalizeInferenceMode(InferenceModeConfig.Value) ?? "Auto", Math.Max(0, CpuThreadsConfig.Value)).ConfigureAwait(false);
-                }
+                string reply = await _ollama.ChatAsync(EndpointConfig.Value, requestModel, messages,
+                    Math.Max(5, TimeoutSecondsConfig.Value), Math.Max(1024, ContextWindowConfig.Value), KeepAliveConfig.Value,
+                    NormalizeInferenceMode(InferenceModeConfig.Value) ?? "Auto", Math.Max(0, CpuThreadsConfig.Value), capturePacket).ConfigureAwait(false);
                 _ollamaUnavailableUntilUtc = DateTime.MinValue;
                 _ollamaUnavailableReason = string.Empty;
+                if (capturePacket != null) PromptCaptureScope.RecordRawModelContent(reply);
                 return reply;
             }
             catch (Exception ex)
@@ -4217,6 +4562,10 @@ namespace ErenshorDeepSims
 
             if (isExternalNewsAnswer) Logger.LogDebug("news answer generation attempt=1 grounding=" + (grounded ? "accept" : "reject reason=" + reason));
 
+            // Diagnostic only: the raw candidate has already been recorded, so a rejection here keeps
+            // both what the model said and why it was refused.
+            PromptCaptureScope.RecordGrounding(grounded ? "accepted" : "rejected", grounded ? string.Empty : reason);
+
             if (!grounded)
             {
                 SetResponseStatus("rejected", speaker.Name + ": " + reason);
@@ -4236,6 +4585,7 @@ namespace ErenshorDeepSims
                     world = beforeRetry.World;
                     speaker = beforeRetry.Speaker;
                 }
+                PromptCaptureScope.RecordQualityRetry();
                 string retry = await TimedChatAsync(messages);
                 if (partyRequest != null)
                 {
@@ -4312,9 +4662,16 @@ namespace ErenshorDeepSims
             }
             if (GroundingGuard.HasInstructionLeak(line)) return "NO_MESSAGE";
 
-            // Bounded output-quality guard: do not let native styling hide a rambling model response
-            // by chopping it at twelve words. Retry the semantic line once so what gets shown is both
-            // complete and genuinely short before the typing-profile pass is applied.
+            // Bounded output-quality guard. This used to send an already-grounded reply back through
+            // the model a second time purely to shorten/polish it ("Rewrite the whole thought as...").
+            // That is a cosmetic operation, not a semantic one, and an LLM rewrite pass is not
+            // fidelity-preserving: it satisfies length/voice checks without verifying the rewritten
+            // line still means what the accepted line meant, which is how a valid reply once drifted
+            // into being about the wrong subject. Deep Sims allows at most ONE semantic LLM retry in
+            // this whole pipeline - the grounding-rejection retry above - so quality issues are now
+            // handled deterministically and spend zero additional Ollama calls:
+            //   overlong  -> trim to the largest whole-sentence prefix that fits the budget
+            //   incomplete / voice-invalid / no safe deterministic trim -> NO_MESSAGE
             if (!IsNoMessage(line))
             {
                 int qualityMaxWords = isExternalNewsAnswer ? 28 : 18;
@@ -4328,45 +4685,21 @@ namespace ErenshorDeepSims
                 if (incomplete || overlong || voiceInvalid)
                 {
                     Logger.LogDebug("reply_quality=reject reason=" + qualityReason);
-                    Logger.LogDebug("reply_quality=retry");
-                    string retryStyleHint = SocialPerspectiveState.RoleplayActive
-                        ? "one complete short spoken line, as yourself, out loud"
-                        : "one complete casual MMO-chat line";
-                    messages.Add(new ChatMessage("user", "Rewrite the whole thought as " + retryStyleHint + " of at most " + qualityMaxWords + " words. Keep the same subject and do not add new facts. Spell every verified party name exactly, and never tack a greeting onto the end of a thought. Return only the replacement line."));
-                    if (partyRequest != null)
+                    string trimmed;
+                    if (overlong && !incomplete && !voiceInvalid &&
+                        ReplyCompletenessGuard.TryDeterministicallyShorten(line, qualityMaxWords, qualityMaxCharacters, out trimmed) &&
+                        !ReplyCompletenessGuard.IsIncomplete(trimmed, out qualityReason))
                     {
-                        PartyInferenceCapture beforeQualityRetry = await RevalidatePartyRequestAsync(partyRequest, speaker, "before-quality-retry").ConfigureAwait(false);
-                        if (beforeQualityRetry == null) return "NO_MESSAGE";
-                        world = beforeQualityRetry.World;
-                        speaker = beforeQualityRetry.Speaker;
-                    }
-                    string retry = await TimedChatAsync(messages);
-                    if (partyRequest != null)
-                    {
-                        PartyInferenceCapture afterQualityRetry = await RevalidatePartyRequestAsync(partyRequest, speaker, "after-quality-retry").ConfigureAwait(false);
-                        if (afterQualityRetry == null) return "NO_MESSAGE";
-                        world = afterQualityRetry.World;
-                        speaker = afterQualityRetry.Speaker;
-                    }
-                    retry = TextSanitizer.CleanReply(retry, speaker.Name, world != null && world.Player != null ? world.Player.Name : null, Math.Max(80, MaxReplyCharactersConfig.Value));
-                    retry = EnforcePartyStance(retry, partyRequest, world, speaker, "after-quality-retry");
-                    if (IsNoMessage(retry)) return "NO_MESSAGE";
-                    string retryCompletenessReason;
-                    bool retryStillIncomplete = !IsNoMessage(retry) && ReplyCompletenessGuard.IsIncomplete(retry, out retryCompletenessReason);
-                    string retryLengthReason;
-                    bool retryStillOverlong = !IsNoMessage(retry) && ReplyCompletenessGuard.IsOverlong(retry, qualityMaxWords, qualityMaxCharacters, out retryLengthReason);
-                    string retryVoiceReason;
-                    bool retryVoiceInvalid = !IsNoMessage(retry) && !ReplyVoiceGuard.IsAcceptable(retry, world, out retryVoiceReason);
-                    bool retryGrounded = !IsNoMessage(retry) && !retryStillIncomplete && !retryStillOverlong && !retryVoiceInvalid &&
-                        GroundingGuard.IsGrounded(retry, memory, world, groundingCorpus, referenceCorpus, out reason) &&
-                        !GroundingGuard.HasInstructionLeak(retry) && SocialIntentGuard.Matches(intent, retry);
-                    if (retryGrounded)
-                    {
-                        line = retry;
-                        Logger.LogDebug("reply_quality=accepted");
+                        string trimVoiceReason;
+                        bool trimmedGrounded = ReplyVoiceGuard.IsAcceptable(trimmed, world, out trimVoiceReason) &&
+                            GroundingGuard.IsGrounded(trimmed, memory, world, groundingCorpus, referenceCorpus, out reason) &&
+                            !GroundingGuard.HasInstructionLeak(trimmed) && SocialIntentGuard.Matches(intent, trimmed);
+                        line = trimmedGrounded ? trimmed : "NO_MESSAGE";
+                        Logger.LogDebug("reply_quality=" + (trimmedGrounded ? "deterministically_shortened" : "shorten_failed_guard"));
                     }
                     else
                     {
+                        Logger.LogDebug("reply_quality=no_safe_deterministic_edit");
                         line = "NO_MESSAGE";
                     }
                 }
@@ -4440,22 +4773,35 @@ namespace ErenshorDeepSims
                 active = world.Party == null ? new List<SimSnapshot>() : new List<SimSnapshot>(world.Party);
                 if (active.Count < 2) break;
 
-                // MaxAutonomousThreadReplies is a hard cap, not a target: only continue when there is a
-                // real conversational hook (question, disagreement, direct mention) in the newest line.
+                // Every line that becomes visible is re-examined here: does it actually invite an answer
+                // from someone else still in the party? SimResponseDecision grades that (named address
+                // and questions strongly, opinions and disagreement normally, plain statements weakly,
+                // tactical spam and acknowledgements not at all). The cap remains a hard upper bound.
                 List<string> knownNames = new List<string>();
                 for (int ni = 0; ni < active.Count; ni++)
                     if (active[ni] != null && !string.IsNullOrWhiteSpace(active[ni].Name)) knownNames.Add(active[ni].Name);
-                bool hasHook = !string.IsNullOrWhiteSpace(threadLastText) && ConversationTurnGuard.HasConversationalHook(threadLastText, knownNames);
+                SimResponseDecision.Result urgeResult = string.IsNullOrWhiteSpace(threadLastText)
+                    ? new SimResponseDecision.Result(SimReplyUrge.None, "empty")
+                    : SimResponseDecision.Evaluate(threadLastText, lastSpeaker, knownNames);
+                bool hasHook = urgeResult.Urge != SimReplyUrge.None;
                 if (!(forceFirstContinuation && generated == 0) && !ConversationTurnGuard.ShouldContinueThread(generated, hardCap, hasHook)) break;
-                // Momentum decay: reply #2 moderately likely with a hook, #3 less likely, #4+ rare
-                // (mostly Lively). generated is 0-based replies queued so far in this tail, so the
-                // reply about to be attempted here is 1-based index generated+2 (the thread's first
-                // line was already displayed before this loop started).
+                // Momentum decay: the first answer is likely when the line invited one, #3 less likely,
+                // #4+ rare. generated is 0-based replies queued so far in this tail, so the reply about
+                // to be attempted here is 1-based index generated+2 (the thread's first line was already
+                // displayed before this loop started).
                 SocialActivityPreset activityPreset = EffectiveSocialActivityPreset();
-                double baseChance = Math.Max(0.05, Math.Min(0.95, SimToSimChanceConfig.Value));
-                double momentum = AmbientCadence.ContinuationChance(generated + 2, hasHook, activityPreset);
-                double chance = baseChance * Math.Max(0.15, momentum);
-                if (!(forceFirstContinuation && generated == 0) && NextSocialDouble() > chance) break;
+                double momentum = AmbientCadence.ContinuationChance(generated + 2, urgeResult.Urge, activityPreset);
+                // SimToSimChance stays the player-facing dial, but it is normalised around its 0.60
+                // default so the graded probabilities above are what actually runs out of the box
+                // instead of being halved by a setting the player never touched.
+                double scale = Math.Max(0.05, Math.Min(0.95, SimToSimChanceConfig.Value)) / 0.60;
+                double chance = Math.Max(0.0, Math.Min(0.98, momentum * scale));
+                if (!(forceFirstContinuation && generated == 0) && NextSocialDouble() > chance)
+                {
+                    Logger.LogDebug("[DeepSims][Thread] no reply this turn urge=" + urgeResult.Urge +
+                        " reason=" + urgeResult.Reason + " index=" + (generated + 2));
+                    break;
+                }
 
                 SimSnapshot next = SelectThreadSpeaker(active, lastSpeaker, speakerCounts, thread.Count == 0 ? null : thread[thread.Count - 1].Text);
                 next = FreshPartyMember(world, next);
@@ -4494,9 +4840,27 @@ namespace ErenshorDeepSims
                         partyRequest = partyCapture.Request;
                         SimMemory memory = threadMemory == null ? null : threadMemory.LoadForPrompt(next);
                         List<ChatMessage> messages = PromptBuilder.BuildPartyThreadReply(next, memory, world, thread, generated + 2, wiki, forceKnowledgeCorrection && generated == 0 ? "correct" : null, groundingFact, PartyReplyIntent.FactualGameQuestion, socialIntent);
-                        reply = await TimedChatAsync(messages);
-                        reply = TextSanitizer.CleanReply(reply, next.Name, world != null && world.Player != null ? world.Player.Name : null, Math.Max(80, MaxReplyCharactersConfig.Value));
-                        reply = await GroundPartyLineAsync(reply, messages, next, memory, world, null, wiki, false, string.Empty, socialIntent, null, "conversation_continuation", partyRequest).ConfigureAwait(false);
+                        // Connected Sim-to-Sim turn. Captured as its own packet, linked to the previous
+                        // speaker's ACCEPTED VISIBLE line.
+                        using (PromptCaptureLease tailLease = PromptCaptureScope.Begin("connected_sim_reply", "sim_to_sim"))
+                        {
+                            if (tailLease != null)
+                            {
+                                DescribeDirectReplyCapture(next, world, thread, wiki, null, memory, null);
+                                ApplyPromptCaptureConnectedParent(generated + 1);
+                                if (socialIntent != null)
+                                    PromptCaptureScope.DescribeSeed("social_intent", socialIntent.TopicKey, socialIntent.Source,
+                                        groundingFact, next == null ? string.Empty : next.Name, true, false, false);
+                            }
+                            reply = await TimedChatAsync(messages);
+                            reply = TextSanitizer.CleanReply(reply, next.Name, world != null && world.Player != null ? world.Player.Name : null, Math.Max(80, MaxReplyCharactersConfig.Value));
+                            reply = await GroundPartyLineAsync(reply, messages, next, memory, world, null, wiki, false, string.Empty, socialIntent, null, "conversation_continuation", partyRequest).ConfigureAwait(false);
+                            PromptCaptureScope.RecordPostGuardContent(reply);
+                            PromptCaptureScope.RecordFinal(!IsNoMessage(reply), IsNoMessage(reply) ? "suppressed" : "LLM", IsNoMessage(reply) ? string.Empty : reply);
+                            if (!IsNoMessage(reply))
+                                NotePromptCaptureConnectedParent(PromptCaptureScope.CurrentRequestId, next.Name,
+                                    PromptCaptureScope.Current == null ? string.Empty : PromptCaptureScope.Current.RawModelContent, reply);
+                        }
                     }
                     finally { _inferenceGate.Release(); }
                 }
@@ -5237,7 +5601,7 @@ namespace ErenshorDeepSims
             QueueRequestWork(RequestLane.Whisper, "diagnostic-status", null, async delegate
             {
                 string status;
-                try { status = await _ollama.GetStatusAsync(EndpointConfig.Value, ModelConfig.Value, 5).ConfigureAwait(false); }
+                try { status = await _ollama.GetStatusAsync(EndpointConfig.Value, ResolvedModel, 5).ConfigureAwait(false); }
                 catch (Exception ex) { status = "Ollama unavailable: " + DiagnosticPrivacy.ExceptionType(ex); }
                 EnqueueMainThread(delegate
                 {
@@ -5388,7 +5752,7 @@ namespace ErenshorDeepSims
                 WriteChat("[DeepSims] AI is unavailable: " + unavailableReason, "yellow");
                 return;
             }
-            WriteChat("[DeepSims] Sending a direct test message to '" + ModelConfig.Value + "'...", "lightblue");
+            WriteChat("[DeepSims] Sending a direct test message to '" + ResolvedModel + "'...", "lightblue");
             QueueRequestWork(RequestLane.Whisper, "diagnostic-ai", null, async delegate
             {
                 await _inferenceGate.WaitAsync().ConfigureAwait(false);

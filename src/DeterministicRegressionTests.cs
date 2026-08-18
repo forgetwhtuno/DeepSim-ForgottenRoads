@@ -187,6 +187,12 @@ namespace ErenshorDeepSims
             Add("output", "unknown colon label is not treated as verified speaker", delegate { string reason; return GroundingGuard.IsGrounded("Wanderer: hi", NewMemory(), NewWorld(null), string.Empty, out reason) ? null : "unknown label rejected: " + reason; });
             Add("output", "maximum reply length is bounded", delegate { string clean = TextSanitizer.CleanReply(new string('x', 100), "Phanty", "Brinon", 20); return clean.Length <= 23 && clean.EndsWith("...") ? null : "length=" + clean.Length; });
             Add("output", "player placeholder is resolved", delegate { return TextSanitizer.CleanReply("hey PLAYER", "Phanty", "Brinon", 80) == "hey Brinon" ? null : "placeholder remained"; });
+            Add("output", "item placeholder token is resolved", delegate { return TextSanitizer.CleanReply("you should grab ITEM", "Phanty", "Brinon", 80) == "you should grab that item" ? null : "ITEM placeholder remained"; });
+            Add("output", "leaked bare II template placeholder is resolved", delegate { return TextSanitizer.CleanReply("you should grab II", "Phanty", "Brinon", 80) == "you should grab that item" ? null : "leaked II placeholder remained"; });
+            // Regression for the Artemis II bug: a literal Roman numeral proper noun must survive the
+            // sanitizer unchanged, not be corrupted into "Artemis that item".
+            Add("output", "Artemis II survives the sanitizer unchanged", delegate { return TextSanitizer.CleanReply("Artemis II was pretty interesting.", "Phanty", "Brinon", 80) == "Artemis II was pretty interesting." ? null : "Artemis II was corrupted: " + TextSanitizer.CleanReply("Artemis II was pretty interesting.", "Phanty", "Brinon", 80); });
+            Add("output", "World War II survives the sanitizer unchanged", delegate { return TextSanitizer.CleanReply("World War II history is neat.", "Phanty", "Brinon", 80) == "World War II history is neat." ? null : "World War II was corrupted"; });
             Add("output", "emoji glyphs are removed", delegate { return TextSanitizer.CleanReply("nice 😀", "Phanty", "Brinon", 80).IndexOf("😀", StringComparison.Ordinal) < 0 ? null : "emoji survived"; });
             Add("output", "modern smile converts to ascii", delegate { string clean = TextSanitizer.CleanReply("nice \uD83D\uDE00", "Phanty", "Brinon", 80); return clean.IndexOf("\uD83D\uDE00", StringComparison.Ordinal) < 0 && clean.IndexOf(":D", StringComparison.Ordinal) >= 0 ? null : "smile was not safely converted: " + clean; });
             Add("output", "joined family emoji is removed", delegate { string clean = TextSanitizer.CleanReply("party \uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67\u200D\uD83D\uDC66 time", "Phanty", "Brinon", 80); return clean == "party time" ? null : "joined emoji residue: " + clean; });
@@ -195,6 +201,19 @@ namespace ErenshorDeepSims
             Add("output", "ascii expressions remain supported", delegate { string clean = TextSanitizer.CleanReply("Hi!Brinon :P lol o7", "Dancer", "Brinon", 80); return clean == "Hi!Brinon :P lol o7" ? null : "ascii style changed: " + clean; });
             Add("output", "native dialogue template retains text-face spacing", delegate { string clean = PromptBuilder.ResolveDialogueTemplate("Hi!NN :P", "Brinon"); return clean == "Hi!Brinon :P" ? null : "template spacing changed: " + clean; });
             Add("output", "duplicate line is detected", delegate { return GroundingGuard.IsTooSimilar("that pull was clean", "that pull was clean") ? null : "duplicate accepted"; });
+            Add("output", "overlong reply is deterministically shortened to a whole-sentence prefix, no LLM call", delegate
+            {
+                string shortened;
+                bool ok = ReplyCompletenessGuard.TryDeterministicallyShorten(
+                    "That pull was clean. We should keep pace like that all night if we can manage it.", 6, 200, out shortened);
+                return ok && shortened == "That pull was clean." ? null : "shorten result=" + (ok ? shortened : "(failed)");
+            });
+            Add("output", "reply with no sentence fitting the budget has no safe deterministic shorten", delegate
+            {
+                string shortened;
+                bool ok = ReplyCompletenessGuard.TryDeterministicallyShorten("this single unbroken thought just keeps going without a period anywhere in it at all", 4, 200, out shortened);
+                return !ok ? null : "unexpectedly produced a shortened result: " + shortened;
+            });
             AddGuard("output", "fabricated loot rejected", "We looted Moonblade.", false, NewMemory(), NewWorld(null));
             AddGuard("output", "unsupported history rejected", "We cleared this before.", false, NewMemory(), NewWorld(null));
             AddGuard("output", "speaker narration rejected", "Phanty says this is easy.", false, NewMemory(), NewWorld(null));

@@ -1,12 +1,19 @@
-# Deep Sims for Erenshor 0.7.3 — social-session overhaul development candidate
+# Deep Sims for Erenshor 0.7.4 — grounded social UX development candidate
 
 Deep Sims makes Erenshor's existing SimPlayers feel more like persistent MMO companions. It observes verified game state, keeps bounded sidecar memory, and produces short social dialogue through deterministic templates or an optional local Ollama model.
 
 **Deep Sims does not replace Erenshor's Sim AI and does not control gameplay.** Erenshor remains authoritative for movement, combat, pulls, healing, targeting, loot, grouping, roles, equipment, quests, faction, progression, and saves.
 
-> This branch is being prepared as a native Lunaris build. Treat 0.7.3 as a development/migration candidate until the compile and in-game conversation checklist is completed on a current Erenshor installation.
+> This branch is being prepared as a native Lunaris build. Treat 0.7.4 as a development/migration candidate until the compile and in-game conversation checklist is completed on a current Erenshor installation.
 
 Part of the **Forgotten Roads for Erenshor** mod collection.
+
+## What's new in 0.7.4
+
+- Explicit opinion and preference questions stay with the Sim instead of triggering factual Wiki/news retrieval.
+- Direct replies that fail grounding use a bounded grounded/template fallback; rejected generated claims remain hidden.
+- `/dsbanter` now creates a bounded connected A+B conversation thread through the existing Social Director.
+- Autonomous semantic seeds temporarily remember verifier rejection, reducing repeated unsupported prompts without turning rejected text into world knowledge.
 
 ## Requirements
 
@@ -151,6 +158,7 @@ A deterministic final party-stance guard rejects or narrowly rewrites lines that
 /aimodel <model>          change Ollama model
 /dwhisper <Sim> <text>    force an AI whisper
 /vwhisper <Sim> <text>    request vanilla-style handling
+/dsbanter                 start a bounded connected A+B banter thread
 /dssession                encounter/session state
 /dsperf                   performance/request diagnostics
 /dsmemory [Sim]           bounded memory inspection
@@ -255,6 +263,6 @@ If Deep Sims does not appear:
 
 ## Development note
 
-This project has been developed substantially with AI-assisted coding tools, guided through design, testing, playtesting, audits, and iteration against Erenshor. Bug reports, code review, corrections, and contributions from experienced Erenshor modders are welcome.
+Development is guided through design, testing, playtesting, audits, and iteration against Erenshor. Bug reports, code review, corrections, and contributions from experienced Erenshor modders are welcome.
 
 This is an unofficial community-made mod for Erenshor and is not affiliated with or endorsed by the game's developer.

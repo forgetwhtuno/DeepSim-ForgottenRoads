@@ -28,19 +28,6 @@ namespace ErenshorDeepSims
             return TryParseTargeted(raw, new string[] { "/whisper", "/tell", "/w", "/t" }, out target, out message);
         }
 
-        internal static bool TryParseFollow(string raw, out string target)
-        {
-            target = null;
-            if (string.IsNullOrWhiteSpace(raw)) return false;
-            string t = raw.Trim();
-            const string prefix = "/dsfollow";
-            if (!t.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return false;
-            if (t.Length == prefix.Length) { target = string.Empty; return true; }
-            if (!char.IsWhiteSpace(t[prefix.Length])) return false;
-            target = t.Substring(prefix.Length).Trim();
-            return true;
-        }
-
         internal static bool TryParseForceAi(string raw, out string target, out string message)
         {
             return TryParseTargeted(raw, new string[] { "/dwhisper", "/dw", "/dsay" }, out target, out message);
@@ -103,6 +90,12 @@ namespace ErenshorDeepSims
             if (!char.IsWhiteSpace(t[prefix.Length])) return false;
             argument = t.Substring(prefix.Length).Trim();
             return true;
+        }
+
+        // Developer diagnostic only: /dspromptcapture [on|off|status|mark <label>].
+        internal static bool TryParsePromptCapture(string raw, out string argument)
+        {
+            return TryParseSimpleArgument(raw, "/dspromptcapture", out argument);
         }
 
         internal static bool TryParseCamp(string raw, out string argument)

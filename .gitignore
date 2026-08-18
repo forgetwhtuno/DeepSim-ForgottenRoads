@@ -21,3 +21,16 @@
 
 # Local candidate build output; source is the publication unit.
 /build-output/
+
+# Local developer prompt-capture packets. These contain real captured conversation and prompt text
+# and are a private diagnostic dataset, never source and never publishable.
+/Diagnostics/
+/DeepSims/Diagnostics/
+**/Diagnostics/PromptCapture/
+
+# Local offline prompt-lab workspace: experimental harness + real captured fixtures/results. Never
+# source, never installed, never published - kept only for local reproducibility.
+/local-labs/
+
+# Local development transport archives; never source.
+*-handoff.zip

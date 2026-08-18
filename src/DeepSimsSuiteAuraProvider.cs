@@ -119,6 +119,10 @@ namespace ErenshorDeepSims
         // arbitrary commands or internal methods.
         private static string HandleAction(string actionId, string argument)
         {
+            if (string.Equals(actionId, "openPanel", StringComparison.OrdinalIgnoreCase))
+                return DeepSimsControlApi.OpenPanel() ? "ok" : "error: open failed";
+            if (string.Equals(actionId, "closePanel", StringComparison.OrdinalIgnoreCase))
+                return DeepSimsControlApi.ClosePanel() ? "ok" : "error: close failed";
             if (!string.Equals(actionId, "refreshStatus", StringComparison.OrdinalIgnoreCase))
                 return "error: unknown action";
             string failure;

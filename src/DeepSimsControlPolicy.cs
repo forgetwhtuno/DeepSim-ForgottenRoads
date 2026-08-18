@@ -213,7 +213,7 @@ namespace ErenshorDeepSims
                 + "&version=" + Escape(Bound(version, 32))
                 + "&summary=" + Escape("Grounded local-AI party social layer")
                 + "&status=" + Escape(Bound(status, MaxHubText))
-                + "&actions=refreshStatus";
+                + "&actions=openPanel,closePanel,refreshStatus";
         }
 
         internal static string BuildBasicSettings(IDictionary<string, string> values)

@@ -3,6 +3,22 @@ using System.Collections.Generic;
 
 namespace ErenshorDeepSims
 {
+    // A connected banter tail is only armed on a queued opener. It is consumed after that opener
+    // actually crosses the final visible-output boundary, so rejected/hidden candidates can never
+    // become "spoken" context for another Sim. The plan carries only bounded semantic seed data;
+    // all live party state is recaptured before the continuation runs.
+    internal sealed class ConnectedBanterPlan
+    {
+        internal int RemainingReplies;
+        internal long OpportunityId;
+        internal string EventType = string.Empty;
+        internal string TopicKey = string.Empty;
+        internal string CooldownGroup = string.Empty;
+        internal string PromptHint = string.Empty;
+        internal string VerifiedFact = string.Empty;
+        internal bool ManualThread;
+    }
+
     // Plain-data typing queue. Every eventual party-chat line retains the conversation generation
     // and diagnostic scope that owned it so the Unity-thread display boundary can revalidate it.
     internal class ScheduledGroupMessage
@@ -20,6 +36,8 @@ namespace ErenshorDeepSims
         internal string GenerationPath = string.Empty;
         internal DateTime PartySnapshotCapturedUtc;
         internal int EligibleSpeakerCount;
+        internal string SoftPreferenceTopicKey = string.Empty;
+        internal ConnectedBanterPlan ConnectedBanter;
     }
 
     internal class GroupMessageQueue
@@ -30,7 +48,8 @@ namespace ErenshorDeepSims
         internal void Enqueue(DateTime dueUtc, string speaker, string text, bool autonomous = false,
             int conversationGeneration = -1, string diagnosticContext = null, long partyRequestId = 0,
             long membershipVersion = -1, string speakerActorId = null, string generationPath = null,
-            DateTime partySnapshotCapturedUtc = default(DateTime), int eligibleSpeakerCount = 0)
+            DateTime partySnapshotCapturedUtc = default(DateTime), int eligibleSpeakerCount = 0,
+            string softPreferenceTopicKey = null, ConnectedBanterPlan connectedBanter = null)
         {
             if (string.IsNullOrWhiteSpace(speaker) || string.IsNullOrWhiteSpace(text)) return;
             lock (_lock)
@@ -49,6 +68,8 @@ namespace ErenshorDeepSims
                 item.GenerationPath = generationPath ?? string.Empty;
                 item.PartySnapshotCapturedUtc = partySnapshotCapturedUtc;
                 item.EligibleSpeakerCount = Math.Max(0, eligibleSpeakerCount);
+                item.SoftPreferenceTopicKey = softPreferenceTopicKey ?? string.Empty;
+                item.ConnectedBanter = connectedBanter;
                 _items.Add(item);
                 _items.Sort(delegate(ScheduledGroupMessage a, ScheduledGroupMessage b) { return a.DueUtc.CompareTo(b.DueUtc); });
             }

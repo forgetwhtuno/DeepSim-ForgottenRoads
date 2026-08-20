@@ -707,7 +707,7 @@ namespace ErenshorDeepSims
             Logger.LogInfo(PluginName + " " + PluginVersion + " loaded. [party-grounding-r2 live-facts+stance-guard] Whole-party Deep Sim enhancement enabled (hard cap 5).");
             Logger.LogInfo("Deep Sims model=" + ResolvedModel + " single-model pipeline active.");
             StandaloneFallbackUi.Initialize(this, "deepsims", "DEEP SIMS",
-                "Quick social controls. Detailed diagnostics and memory tools remain available through compatibility commands.", 280f,
+                "Quick social controls. Detailed diagnostics and memory tools remain available through compatibility commands.", 280f, 70f,
                 DeepSimsControlApi.GetHubStatus,
                 new FallbackAction("Refresh Status", RefreshFallbackStatus, null),
                 new FallbackAction("Quiet", delegate { return SetFallbackActivity("Quiet"); }, null),
